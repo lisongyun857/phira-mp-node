@@ -24,6 +24,23 @@ api:
   # 访问令牌；对外暴露时必须设置，并同步到 AstrBot 插件配置
   access_token: ""
 
+# Phira 账号绑定（QQ 用户通过一次性链接登录 Phira）
+# 公网访问路径由反向代理负责，例如把 https://你的域名/login/ 反代到 http://127.0.0.1:3052/login/
+login:
+  # 是否启用账号绑定
+  enabled: true
+  # 生成登录链接时使用的公网地址（末尾不要带 /）
+  public_url: "https://phira.lisongyun.top"
+  # 登录链接有效期（秒）
+  link_ttl: 600
+  # 单个链接允许的密码尝试次数
+  max_attempts: 5
+  # QQ/Phira 绑定数据文件（不会保存密码或 Phira token）
+  bindings_file: "data/bindings.json"
+  # 调用 Phira /login 时上报的客户端版本与渠道
+  client_version: "0.6.7"
+  client_flavor: "none"
+
 # QQ 机器人（NapCat 反向 WebSocket：NapCat 连接本服务器）
 # 接入 AstrBot 后建议将 enabled 设为 false，避免两个机器人重复回复
 qq_bot:

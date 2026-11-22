@@ -1,6 +1,7 @@
 import net from 'node:net';
 import crypto from 'node:crypto';
 import { Session } from './session.js';
+import { LoginManager } from './login.js';
 import { loadConfig } from './config.js';
 import { log } from './logger.js';
 
@@ -15,6 +16,7 @@ export class ServerState {
     this.rooms = new Map();
     /** 是否允许玩家在客户端创建房间；控制台/QQ/API 建房不受影响 */
     this.allowClientCreateRoom = config.allowClientCreateRoom !== false;
+    this.login = new LoginManager(config.login);
   }
 }
 

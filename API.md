@@ -16,6 +16,14 @@ api:
   port: 3052
   # 对外暴露时务必设置一个足够随机的令牌
   access_token: "change-me"
+
+login:
+  enabled: true
+  # 登录链接使用的公网地址；/login/ 需要反向代理到本 API
+  public_url: "https://phira.lisongyun.top"
+  link_ttl: 600
+  max_attempts: 5
+  bindings_file: "data/bindings.json"
 ```
 
 修改后需要重启服务器，`reload` 不会重新加载 API 配置。
@@ -38,6 +46,17 @@ Authorization: Bearer <access_token>
 
 > API 令牌等同于管理员权限：可以查看隐藏房间、创建/删除房间、发送管理消息和公告。
 > 管理员 QQ 的校验由 AstrBot 插件完成（`admin_ids`），API 本身不区分 QQ 身份。
+
+## 公开登录页面
+
+以下两个路径**不需要** API 令牌，供 QQ 用户打开浏览器完成 Phira 账号绑定：
+
+- `GET /login/<code>`：登录表单
+- `POST /login/<code>`：提交 Phira 邮箱和密码
+
+它们由反向代理暴露在 `login.public_url` 下，例如把 `https://phira.lisongyun.top/login/` 转发到 `http://127.0.0.1:3052/login/`。`<code>` 是由 `/api/login/link` 生成的一次性登录码，默认 10 分钟有效。
+
+密码只用于向 Phira 官方 `/login` 验证，不会写入日志或绑定文件；Phira token 在读取完用户信息后丢弃。绑定只保存 Phira ID、昵称、头像和绑定时间。
 
 ## 响应格式
 
@@ -116,6 +135,71 @@ Authorization: Bearer <access_token>
 ```
 
 `enabled` 必须是布尔值。该开关是运行时状态，重启后恢复为 `server_config.yml` 中的 `allow_client_create_room`。
+
+### `POST /api/login/link`
+
+为 QQ 用户生成一次性 Phira 登录链接。
+
+```json
+{
+  "platform": "qq",
+  "userId": "123456789"
+}
+```
+
+成功：
+
+```json
+{
+  "ok": true,
+  "data": {
+    "link": "https://phira.lisongyun.top/login/xxxxxxxx",
+    "expiresAt": "2026-11-22T16:30:00.000Z"
+  }
+}
+```
+
+`platform` 省略时默认为 `qq`。该接口只生成链接，不检查是否已绑定；插件可以先调用绑定查询接口。
+
+### `GET /api/login/binding?platform=qq&userId=123456789`
+
+查询绑定。
+
+已绑定：
+
+```json
+{
+  "ok": true,
+  "data": {
+    "bound": true,
+    "binding": {
+      "platform": "qq",
+      "userId": "123456789",
+      "phiraId": 12345,
+      "phiraName": "玩家昵称",
+      "phiraAvatar": "https://...",
+      "boundAt": "2026-11-22T16:20:00.000Z"
+    }
+  }
+}
+```
+
+未绑定：`{ "ok": true, "data": { "bound": false } }`
+
+### `DELETE /api/login/binding`
+
+解除绑定。
+
+```json
+{
+  "platform": "qq",
+  "userId": "123456789"
+}
+```
+
+返回 `{ "ok": true, "data": { "unbound": true } }`；没有绑定时 `unbound` 为 `false`。
+
+绑定规则：一个 QQ 只能绑定一个 Phira 账号，一个 Phira 账号也只能绑定一个 QQ。重复登录会覆盖该 QQ 的旧绑定；如果 Phira 账号已属于其他 QQ，页面会拒绝并提示先解绑。
 
 ### `GET /api/rooms`
 
@@ -278,6 +362,8 @@ curl -s -X POST -H "Authorization: Bearer $PHIRA_TOKEN" \
 ```
 
 ### Python / AstrBot
+
+账号绑定与后续房间指令的插件开发说明见 [PLUGIN.md](PLUGIN.md)。
 
 ```python
 import aiohttp

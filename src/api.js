@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { Room, ROOM_MAX_USERS } from './room.js';
 import { isValidRoomId } from './protocol/models.js';
+import { handleLoginPage, normalizeLoginIdentity } from './login.js';
 import { log } from './logger.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
@@ -103,6 +104,66 @@ async function handleRequest(state, req, res) {
       allowClientCreateRoom: Boolean(state.allowClientCreateRoom),
       memoryMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
     });
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/login/link') {
+    const body = await readJson(req);
+    const identity = normalizeLoginIdentity(body.platform, body.userId);
+    if (!identity) {
+      fail(res, 400, 'platform/userId 不合法');
+      return;
+    }
+    if (!state.login) {
+      fail(res, 503, '登录服务未初始化');
+      return;
+    }
+    const created = state.login.createSession(identity.platform, identity.userId);
+    if (!created.ok) {
+      fail(res, created.error === '登录功能未启用' ? 403 : 400, created.error);
+      return;
+    }
+    ok(res, {
+      link: created.link,
+      expiresAt: new Date(created.expiresAt).toISOString(),
+    });
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/login/binding') {
+    const identity = normalizeLoginIdentity(
+      url.searchParams.get('platform'),
+      url.searchParams.get('userId'),
+    );
+    if (!identity) {
+      fail(res, 400, 'platform/userId 不合法');
+      return;
+    }
+    if (!state.login) {
+      fail(res, 503, '登录服务未初始化');
+      return;
+    }
+    const binding = state.login.getBinding(identity.platform, identity.userId);
+    ok(res, binding ? { bound: true, binding } : { bound: false });
+    return;
+  }
+
+  if (method === 'DELETE' && pathname === '/api/login/binding') {
+    const body = await readJson(req);
+    const identity = normalizeLoginIdentity(body.platform, body.userId);
+    if (!identity) {
+      fail(res, 400, 'platform/userId 不合法');
+      return;
+    }
+    if (!state.login) {
+      fail(res, 503, '登录服务未初始化');
+      return;
+    }
+    const removed = state.login.unbind(identity.platform, identity.userId);
+    log.info(
+      `API: ${removed ? 'unbound' : 'no binding for'} ${identity.platform}:${identity.userId}`,
+    );
+    ok(res, { unbound: removed });
     return;
   }
 
@@ -242,6 +303,17 @@ export function startApi(state) {
   }
 
   const server = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://localhost');
+    if (url.pathname === '/login' || url.pathname.startsWith('/login/')) {
+      handleLoginPage(state, req, res, url).catch((e) => {
+        log.error(`login: unhandled error: ${e.stack || e.message}`);
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end('internal server error');
+        }
+      });
+      return;
+    }
     if (!isAuthorized(req, config.accessToken)) {
       fail(res, 401, 'unauthorized');
       return;

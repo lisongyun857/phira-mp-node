@@ -13,6 +13,7 @@ Phira 多人游戏服务器的 Node.js 重写版，二进制协议与 [TeamFlos/
 - 隐藏房间：房间 ID 以 `_` 开头时不出现在公开房间列表（仍可凭完整 ID 加入）
 - 客户端建房开关：控制台、QQ、API 可禁止玩家自行建房，管理员指令建房不受影响
 - 在线房间列表显示游戏阶段（未开始 / 准备中 / 游戏中）
+- Phira 账号绑定：QQ 用户通过一次性链接使用 Phira 邮箱密码登录，登录后可执行房间相关指令
 - 交互式命令行控制台
 - NapCat QQ 机器人（OneBot 11 反向 WebSocket）：房间查询、管理员建房/删房、管理消息、公告、定时房间推送
 - HTTP 管理 API：供 AstrBot 等外部程序查询和管理服务器
@@ -61,6 +62,15 @@ api:
   port: 3052
   access_token: ""
 
+login:
+  enabled: true
+  public_url: "https://phira.lisongyun.top"
+  link_ttl: 600
+  max_attempts: 5
+  bindings_file: "data/bindings.json"
+  client_version: "0.6.7"
+  client_flavor: "none"
+
 qq_bot:
   enabled: true
   port: 3001
@@ -78,18 +88,27 @@ qq_bot:
 | `announcements` | 玩家连接服务器时展示的公告，每条一行 |
 | `show_online_rooms` | 连接时是否展示在线房间列表 |
 | `allow_client_create_room` | 是否允许玩家在客户端创建房间；控制台、QQ、API 指令建房不受影响 |
-
-> `allow_client_create_room` 是启动时的默认值；通过控制台 `roomlock`、QQ `#建房开关` 或 API 修改只在运行时生效，重启后恢复配置值。
 | `api.enabled` | 是否启用 HTTP 管理 API |
 | `api.host` | API 监听地址，默认仅本机；跨机器访问时改为 `0.0.0.0` |
 | `api.port` | API 监听端口 |
 | `api.access_token` | API 访问令牌；对外暴露时务必设置 |
+| `login.enabled` | 是否启用 Phira 账号绑定 |
+| `login.public_url` | 登录链接使用的公网地址，例如 `https://phira.lisongyun.top` |
+| `login.link_ttl` | 登录链接有效期（秒） |
+| `login.max_attempts` | 单个链接允许的密码尝试次数 |
+| `login.bindings_file` | QQ/Phira 绑定数据文件，不保存密码或 token |
+| `login.client_version` | 调用 Phira `/login` 时上报的客户端版本 |
+| `login.client_flavor` | 调用 Phira `/login` 时上报的客户端渠道 |
 | `qq_bot.enabled` | 是否启用 QQ 机器人 |
 | `qq_bot.port` | 机器人 WebSocket 监听端口 |
 | `qq_bot.access_token` | 与 NapCat 的 token 一致；留空不校验 |
 | `qq_bot.admin_qq` | 允许建房/删房/管理消息/公告的 QQ 号 |
 | `qq_bot.group_ids` | 定时推送在线房间的群号 |
 | `qq_bot.report_interval` | 定时推送间隔（秒），`0` 关闭 |
+
+> `allow_client_create_room` 是启动时的默认值；通过控制台 `roomlock`、QQ `#建房开关` 或 API 修改只在运行时生效，重启后恢复配置值。
+
+> 登录页面需要由反向代理把 `/login/` 转发到 `http://127.0.0.1:3052/login/`，例如 `https://phira.lisongyun.top/login/xxx`。反向代理和证书由部署者自行配置。
 
 修改后可在控制台执行 `reload` 重新加载游戏侧配置；QQ 机器人和 HTTP API 的配置在启动时读取，需要重启服务器生效。
 
@@ -165,12 +184,18 @@ phiraserver 通过 HTTP API 对外提供数据和管理能力，配套的 AstrBo
 | `/p管理消息 <房间ID\|all> <内容>` | 向房间发送管理消息（管理员） |
 | `/p建房开关 开\|关` | 禁止/允许玩家在客户端创建房间（管理员） |
 | `/p公告 <内容>` | 向所有在线玩家发送公告（管理员） |
+| `/p登录` | 生成 Phira 账号登录链接，或显示已绑定账号 |
+| `/p我的` | 查看当前绑定的 Phira 账号 |
+| `/p解绑` | 解除 QQ 与 Phira 账号的绑定 |
+
+登录与绑定流程、API 字段、后续房间指令的权限模型见 [PLUGIN.md](PLUGIN.md)。
 
 HTTP API 默认监听 `http://127.0.0.1:3052`，完整的认证方式、端点、响应格式和 AstrBot 开发示例见 [API.md](API.md)。
 
 ## 文档
 
 - [API.md](API.md)：HTTP API 认证、端点、响应格式与 AstrBot 插件开发示例
+- [PLUGIN.md](PLUGIN.md)：Phira 账号绑定流程与 AstrBot 插件开发说明
 
 ## 目录结构
 
@@ -178,6 +203,7 @@ HTTP API 默认监听 `http://127.0.0.1:3052`，完整的认证方式、端点�
 src/
   index.js            入口：TCP 监听、控制台、QQ 机器人
   server.js           服务器状态（连接/用户/房间）
+  login.js            Phira 账号绑定、登录页面与绑定存储
   session.js          协议会话、鉴权、命令处理
   room.js             房间与游戏状态机
   user.js             用户、掉线等待

@@ -21,6 +21,15 @@ const DEFAULT_CONFIG = {
     port: 3052,
     accessToken: '',
   },
+  login: {
+    enabled: true,
+    publicUrl: '',
+    linkTtl: 600,
+    maxAttempts: 5,
+    bindingsFile: 'data/bindings.json',
+    clientVersion: '0.6.7',
+    clientFlavor: 'none',
+  },
 };
 
 function stripComment(value) {
@@ -169,6 +178,7 @@ export function loadConfig() {
   const monitors = parseList(lines, 'monitors');
   const qqBotLines = sectionLines(lines, 'qq_bot');
   const apiLines = sectionLines(lines, 'api');
+  const loginLines = sectionLines(lines, 'login');
 
   return {
     monitors:
@@ -203,6 +213,31 @@ export function loadConfig() {
       host: parseString(apiLines, 'host', DEFAULT_CONFIG.api.host),
       port: parseNumber(apiLines, 'port', DEFAULT_CONFIG.api.port),
       accessToken: parseString(apiLines, 'access_token', DEFAULT_CONFIG.api.accessToken),
+    },
+    login: {
+      enabled: parseBool(loginLines, 'enabled', DEFAULT_CONFIG.login.enabled),
+      publicUrl: parseString(loginLines, 'public_url', DEFAULT_CONFIG.login.publicUrl),
+      linkTtl: parseNumber(loginLines, 'link_ttl', DEFAULT_CONFIG.login.linkTtl),
+      maxAttempts: parseNumber(
+        loginLines,
+        'max_attempts',
+        DEFAULT_CONFIG.login.maxAttempts,
+      ),
+      bindingsFile: parseString(
+        loginLines,
+        'bindings_file',
+        DEFAULT_CONFIG.login.bindingsFile,
+      ),
+      clientVersion: parseString(
+        loginLines,
+        'client_version',
+        DEFAULT_CONFIG.login.clientVersion,
+      ),
+      clientFlavor: parseString(
+        loginLines,
+        'client_flavor',
+        DEFAULT_CONFIG.login.clientFlavor,
+      ),
     },
   };
 }
