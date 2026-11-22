@@ -31,7 +31,6 @@ export class Room {
   claimHost(user) {
     if (this.host) return false;
     this.host = user;
-    user.trySend({ type: 'ChangeHost', host: true });
     return true;
   }
 

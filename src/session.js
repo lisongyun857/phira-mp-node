@@ -349,7 +349,8 @@ async function processCommand(user, cmd) {
           log.info(`user ${user.id} join room ${cmd.id} (monitor: ${cmd.monitor})`);
 
           user.monitor = cmd.monitor;
-          if (!cmd.monitor && room.claimHost(user)) {
+          const becameHost = !cmd.monitor && room.claimHost(user);
+          if (becameHost) {
             log.info(`user ${user.id} became host of room ${room.id}`);
           }
           if (cmd.monitor && !room.live) {
@@ -359,6 +360,12 @@ async function processCommand(user, cmd) {
           room.broadcast({ type: 'OnJoinRoom', user: user.toInfo() });
           room.sendMessage({ type: 'JoinRoom', user: user.id, name: user.name });
           user.room = room;
+          if (becameHost) {
+            // 必须在 JoinRoom 响应之后发送，否则客户端会在入房完成前处理房主变更并超时
+            setImmediate(() => {
+              if (user.room === room) user.trySend({ type: 'ChangeHost', host: true });
+            });
+          }
 
           return {
             state: room.toClientState(),
