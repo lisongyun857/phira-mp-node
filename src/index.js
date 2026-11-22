@@ -1,6 +1,7 @@
 import { createServer } from './server.js';
 import { startConsole } from './console.js';
 import { startQQBot } from './bot.js';
+import { startApi } from './api.js';
 import { log } from './logger.js';
 
 const DEFAULT_PORT = 12346;
@@ -32,6 +33,7 @@ tcp.listen(port, () => {
   log.info(`Local Address: [::]:${port}`);
   startConsole(state, tcp);
   startQQBot(state);
+  startApi(state);
 });
 
 process.on('uncaughtException', (e) => {

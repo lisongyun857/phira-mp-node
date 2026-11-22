@@ -10,7 +10,20 @@ announcements:
 # 连接时是否展示在线房间列表
 show_online_rooms: true
 
+# HTTP API：供 AstrBot 等外部程序查询和管理服务器
+# 修改后需要重启服务器生效
+api:
+  # 是否启用
+  enabled: true
+  # 监听地址；AstrBot 与服务器不在同一台机器时改为 0.0.0.0
+  host: "127.0.0.1"
+  # 监听端口
+  port: 3052
+  # 访问令牌；对外暴露时必须设置，并同步到 AstrBot 插件配置
+  access_token: ""
+
 # QQ 机器人（NapCat 反向 WebSocket：NapCat 连接本服务器）
+# 接入 AstrBot 后建议将 enabled 设为 false，避免两个机器人重复回复
 qq_bot:
   enabled: true
   # 本服务器监听的 WebSocket 端口，NapCat 里填 ws://服务器地址:3001

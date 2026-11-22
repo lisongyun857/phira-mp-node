@@ -13,6 +13,7 @@ Phira 多人游戏服务器的 Node.js 重写版，二进制协议与 [TeamFlos/
 - 隐藏房间：房间 ID 以 `_` 开头时不出现在公开房间列表（仍可凭完整 ID 加入）
 - 交互式命令行控制台
 - NapCat QQ 机器人（OneBot 11 反向 WebSocket）：房间查询、管理员建房/删房、管理消息、公告、定时房间推送
+- HTTP 管理 API：供 AstrBot 等外部程序查询和管理服务器
 - 按小时写入 `log/` 的日志（含聊天记录）
 
 ## 环境要求
@@ -51,6 +52,12 @@ announcements:
 
 show_online_rooms: true
 
+api:
+  enabled: true
+  host: "127.0.0.1"
+  port: 3052
+  access_token: ""
+
 qq_bot:
   enabled: true
   port: 3001
@@ -67,6 +74,10 @@ qq_bot:
 | `monitors` | 允许旁观（monitor）的 Phira 用户 ID |
 | `announcements` | 玩家连接服务器时展示的公告，每条一行 |
 | `show_online_rooms` | 连接时是否展示在线房间列表 |
+| `api.enabled` | 是否启用 HTTP 管理 API |
+| `api.host` | API 监听地址，默认仅本机；跨机器访问时改为 `0.0.0.0` |
+| `api.port` | API 监听端口 |
+| `api.access_token` | API 访问令牌；对外暴露时务必设置 |
 | `qq_bot.enabled` | 是否启用 QQ 机器人 |
 | `qq_bot.port` | 机器人 WebSocket 监听端口 |
 | `qq_bot.access_token` | 与 NapCat 的 token 一致；留空不校验 |
@@ -74,7 +85,7 @@ qq_bot:
 | `qq_bot.group_ids` | 定时推送在线房间的群号 |
 | `qq_bot.report_interval` | 定时推送间隔（秒），`0` 关闭 |
 
-修改后可在控制台执行 `reload` 重新加载游戏侧配置；QQ 机器人的配置（端口、管理员、群号、推送间隔）在启动时读取，需要重启服务器生效。
+修改后可在控制台执行 `reload` 重新加载游戏侧配置；QQ 机器人和 HTTP API 的配置在启动时读取，需要重启服务器生效。
 
 > 请把示例中的 `admin_qq`、`group_ids` 换成自己的 QQ 号和群号。
 
@@ -124,6 +135,34 @@ qq_bot:
 
 `group_ids` 中的群会按 `report_interval` 定时收到在线房间推送（没有公开房间时跳过）。
 
+## AstrBot 接入（/p 指令）
+
+phiraserver 通过 HTTP API 对外提供数据和管理能力，配套的 AstrBot 插件为 `astrbot_plugin_phira_mp`，将插件目录放入 AstrBot 的 `data/plugins/` 后重载即可。
+
+1. 在 `server_config.yml` 中启用 `api`，对外暴露时设置 `access_token`。
+2. 若 AstrBot 与服务器不在同一台机器，将 `api.host` 改为 `0.0.0.0`。
+3. 在 AstrBot 插件配置中填写 `api_base`、`api_token` 和管理员 QQ `admin_ids`。
+4. 同时启用内置 `qq_bot` 会导致两个机器人重复回复，建议将 `qq_bot.enabled` 设为 `false`。
+
+指令同时支持 `/p房间` 和 `/p 房间` 两种写法：
+
+| 指令 | 说明 |
+| --- | --- |
+| `/p房间` | 查看在线房间 |
+| `/p房间 全部` | 查看全部房间（含隐藏，管理员） |
+| `/p状态` | 查看服务器状态 |
+| `/p帮助` | 显示命令列表 |
+| `/p创建房间 <房间ID>` | 创建房间（管理员） |
+| `/p删除房间 <房间ID>` | 解散并删除房间（管理员） |
+| `/p管理消息 <房间ID\|all> <内容>` | 向房间发送管理消息（管理员） |
+| `/p公告 <内容>` | 向所有在线玩家发送公告（管理员） |
+
+HTTP API 默认监听 `http://127.0.0.1:3052`，完整的认证方式、端点、响应格式和 AstrBot 开发示例见 [API.md](API.md)。
+
+## 文档
+
+- [API.md](API.md)：HTTP API 认证、端点、响应格式与 AstrBot 插件开发示例
+
 ## 目录结构
 
 ```
@@ -136,6 +175,7 @@ src/
   lobby.js            公告与在线房间文案
   console.js          命令行控制台
   bot.js              NapCat / OneBot 11 WebSocket 机器人
+  api.js              HTTP 管理 API（供 AstrBot 接入）
   config.js           server_config.yml 读取
   logger.js           控制台与文件日志
   l10n.js             多语言错误文案

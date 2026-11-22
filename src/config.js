@@ -14,6 +14,12 @@ const DEFAULT_CONFIG = {
     groupIds: [],
     reportInterval: 300,
   },
+  api: {
+    enabled: true,
+    host: '127.0.0.1',
+    port: 3052,
+    accessToken: '',
+  },
 };
 
 function stripComment(value) {
@@ -71,6 +77,30 @@ function findKey(lines, key) {
     if (match) return { index: i, rest: match[1] };
   }
   return null;
+}
+
+/** 取出某个顶层配置段（缩进在其下的所有行），用于避免不同段中的同名键互相干扰。 */
+function sectionLines(lines, sectionName) {
+  const pattern = new RegExp(`^(\\s*)${sectionName}\\s*:`);
+  for (let i = 0; i < lines.length; i += 1) {
+    const match = lines[i].match(pattern);
+    if (!match) continue;
+
+    const baseIndent = match[1].length;
+    const result = [];
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const line = lines[j];
+      if (!line.trim()) {
+        result.push(line);
+        continue;
+      }
+      const indent = line.match(/^(\s*)/)[1].length;
+      if (indent <= baseIndent) break;
+      result.push(line);
+    }
+    return result;
+  }
+  return [];
 }
 
 /** 读取列表型配置，未配置时返回 null。 */
@@ -136,6 +166,8 @@ export function loadConfig() {
 
   const lines = text.split(/\r?\n/);
   const monitors = parseList(lines, 'monitors');
+  const qqBotLines = sectionLines(lines, 'qq_bot');
+  const apiLines = sectionLines(lines, 'api');
 
   return {
     monitors:
@@ -145,16 +177,26 @@ export function loadConfig() {
     announcements: parseList(lines, 'announcements') ?? [],
     showOnlineRooms: parseBool(lines, 'show_online_rooms', true),
     qqBot: {
-      enabled: parseBool(lines, 'enabled', DEFAULT_CONFIG.qqBot.enabled),
-      port: parseNumber(lines, 'port', DEFAULT_CONFIG.qqBot.port),
-      accessToken: parseString(lines, 'access_token', DEFAULT_CONFIG.qqBot.accessToken),
-      adminQQ: parseNumberList(lines, 'admin_qq', DEFAULT_CONFIG.qqBot.adminQQ),
-      groupIds: parseNumberList(lines, 'group_ids', DEFAULT_CONFIG.qqBot.groupIds),
+      enabled: parseBool(qqBotLines, 'enabled', DEFAULT_CONFIG.qqBot.enabled),
+      port: parseNumber(qqBotLines, 'port', DEFAULT_CONFIG.qqBot.port),
+      accessToken: parseString(
+        qqBotLines,
+        'access_token',
+        DEFAULT_CONFIG.qqBot.accessToken,
+      ),
+      adminQQ: parseNumberList(qqBotLines, 'admin_qq', DEFAULT_CONFIG.qqBot.adminQQ),
+      groupIds: parseNumberList(qqBotLines, 'group_ids', DEFAULT_CONFIG.qqBot.groupIds),
       reportInterval: parseNumber(
-        lines,
+        qqBotLines,
         'report_interval',
         DEFAULT_CONFIG.qqBot.reportInterval,
       ),
+    },
+    api: {
+      enabled: parseBool(apiLines, 'enabled', DEFAULT_CONFIG.api.enabled),
+      host: parseString(apiLines, 'host', DEFAULT_CONFIG.api.host),
+      port: parseNumber(apiLines, 'port', DEFAULT_CONFIG.api.port),
+      accessToken: parseString(apiLines, 'access_token', DEFAULT_CONFIG.api.accessToken),
     },
   };
 }
