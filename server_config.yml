@@ -1,0 +1,27 @@
+# 与 phira-mp-server 的 server_config.yml 等价
+monitors:
+  - 2
+
+# 玩家连接服务器时展示的公告（每条一行聊天消息）
+announcements:
+  - "欢迎来到 Phira 多人服务器"
+  - "房间名以 _ 开头时不会出现在在线房间列表中"
+
+# 连接时是否展示在线房间列表
+show_online_rooms: true
+
+# QQ 机器人（NapCat 反向 WebSocket：NapCat 连接本服务器）
+qq_bot:
+  enabled: true
+  # 本服务器监听的 WebSocket 端口，NapCat 里填 ws://服务器地址:3001
+  port: 3001
+  # 可选，和 NapCat 的 access token 保持一致；留空表示不校验
+  access_token: ""
+  # 允许管理房间的 QQ 号（创建房间、管理消息、公告）
+  admin_qq:
+    - 10001
+  # 定时推送在线房间的 QQ 群号
+  group_ids:
+    - 123456
+  # 推送间隔（秒），0 表示关闭定时推送
+  report_interval: 300

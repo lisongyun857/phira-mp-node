@@ -1,0 +1,39 @@
+import net from 'node:net';
+import crypto from 'node:crypto';
+import { Session } from './session.js';
+import { loadConfig } from './config.js';
+import { log } from './logger.js';
+
+export class ServerState {
+  constructor(config) {
+    this.config = config;
+    /** uuid -> Session */
+    this.sessions = new Map();
+    /** user id -> User */
+    this.users = new Map();
+    /** room id -> Room */
+    this.rooms = new Map();
+  }
+}
+
+export function createServer() {
+  const state = new ServerState(loadConfig());
+  log.info(
+    `loaded ${state.config.announcements.length} announcement(s), online room list ${
+      state.config.showOnlineRooms ? 'on' : 'off'
+    }`,
+  );
+
+  const tcp = net.createServer((socket) => {
+    const id = crypto.randomUUID();
+    const session = new Session(id, socket, state);
+    state.sessions.set(id, session);
+    log.info(
+      `received connection from ${socket.remoteAddress}:${socket.remotePort} (${id})`,
+    );
+  });
+
+  tcp.on('error', (e) => log.error(`server error: ${e.stack || e.message}`));
+
+  return { state, tcp };
+}

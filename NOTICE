@@ -1,0 +1,10 @@
+phira-mp-node
+
+Copyright 2026 phira-mp-node contributors
+
+This product includes protocol definitions and behavior derived from phira-mp
+(https://github.com/TeamFlos/phira-mp), which is licensed under the Apache
+License, Version 2.0.
+
+phira-mp-node is an independent, unofficial Node.js rewrite. It is not
+affiliated with or endorsed by TeamFlos.
