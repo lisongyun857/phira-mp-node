@@ -6,6 +6,7 @@ const DEFAULT_CONFIG = {
   monitors: [2],
   announcements: [],
   showOnlineRooms: true,
+  allowClientCreateRoom: true,
   qqBot: {
     enabled: true,
     port: 3001,
@@ -176,6 +177,11 @@ export function loadConfig() {
         : monitors.map(Number).filter((it) => Number.isInteger(it)),
     announcements: parseList(lines, 'announcements') ?? [],
     showOnlineRooms: parseBool(lines, 'show_online_rooms', true),
+    allowClientCreateRoom: parseBool(
+      lines,
+      'allow_client_create_room',
+      DEFAULT_CONFIG.allowClientCreateRoom,
+    ),
     qqBot: {
       enabled: parseBool(qqBotLines, 'enabled', DEFAULT_CONFIG.qqBot.enabled),
       port: parseNumber(qqBotLines, 'port', DEFAULT_CONFIG.qqBot.port),

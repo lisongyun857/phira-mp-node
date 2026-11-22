@@ -1,5 +1,6 @@
 {
   "create-id-occupied": "房间 ID 已被占用",
+  "create-room-disabled": "服务器已禁止玩家创建房间，请联系管理员",
   "join-game-ongoing": "游戏正在进行中",
   "join-room-full": "房间已满",
   "join-room-locked": "房间已锁定",

@@ -9,6 +9,8 @@ announcements:
 
 # 连接时是否展示在线房间列表
 show_online_rooms: true
+# 是否允许玩家在客户端创建房间；控制台、QQ 指令和 HTTP API 建房不受此开关影响
+allow_client_create_room: true
 
 # HTTP API：供 AstrBot 等外部程序查询和管理服务器
 # 修改后需要重启服务器生效

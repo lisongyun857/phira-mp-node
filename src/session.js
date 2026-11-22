@@ -317,6 +317,9 @@ async function processCommand(user, cmd) {
         type: 'CreateRoom',
         result: await attempt(async () => {
           if (user.room) throw new Error('already in room');
+          if (!user.server.allowClientCreateRoom) {
+            throw new Error(t(user.lang, 'create-room-disabled'));
+          }
           if (user.server.rooms.has(cmd.id)) {
             throw new Error(t(user.lang, 'create-id-occupied'));
           }

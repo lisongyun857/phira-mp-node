@@ -13,6 +13,8 @@ export class ServerState {
     this.users = new Map();
     /** room id -> Room */
     this.rooms = new Map();
+    /** 是否允许玩家在客户端创建房间；控制台/QQ/API 建房不受影响 */
+    this.allowClientCreateRoom = config.allowClientCreateRoom !== false;
   }
 }
 

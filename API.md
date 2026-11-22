@@ -83,6 +83,7 @@ Authorization: Bearer <access_token>
     "users": 3,
     "sessions": 3,
     "rooms": 2,
+    "allowClientCreateRoom": true,
     "memoryMB": 48
   }
 }
@@ -94,7 +95,27 @@ Authorization: Bearer <access_token>
 | `users` | 服务器上的用户数（包含掉线等待重连） |
 | `sessions` | 当前 TCP 连接数 |
 | `rooms` | 房间数（含隐藏房间） |
+| `allowClientCreateRoom` | 是否允许玩家在客户端创建房间 |
 | `memoryMB` | 进程 RSS 内存 |
+
+### `POST /api/room-creation`
+
+允许或禁止玩家在客户端创建房间。控制台、QQ 指令和本 API 建房不受影响。
+
+```json
+{ "enabled": false }
+```
+
+成功返回：
+
+```json
+{
+  "ok": true,
+  "data": { "enabled": false }
+}
+```
+
+`enabled` 必须是布尔值。该开关是运行时状态，重启后恢复为 `server_config.yml` 中的 `allow_client_create_room`。
 
 ### `GET /api/rooms`
 
@@ -323,6 +344,7 @@ async def p_rooms(self, event: AstrMessageEvent):
 | `/p创建房间 <房间ID>` | 创建房间（管理员） |
 | `/p删除房间 <房间ID>` | 解散并删除房间（管理员） |
 | `/p管理消息 <房间ID\|all> <内容>` | 向房间发送管理消息（管理员） |
+| `/p建房开关 开\|关` | 禁止/允许玩家在客户端创建房间（管理员） |
 | `/p公告 <内容>` | 向所有在线玩家发送公告（管理员） |
 
 ## 安全建议

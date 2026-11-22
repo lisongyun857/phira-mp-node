@@ -3,12 +3,14 @@ import { loadConfig } from './config.js';
 import { log } from './logger.js';
 import { Room, ROOM_MAX_USERS } from './room.js';
 import { isValidRoomId } from './protocol/models.js';
+import { roomStateName } from './lobby.js';
 
 const HELP_TEXT = `可用命令：
   help                     显示帮助
   status                   查看服务器状态
   rooms                    列出所有房间（含隐藏房间）
   create <房间ID>          创建房间，第一个加入的玩家成为房主
+  roomlock on|off          禁止/允许玩家在客户端创建房间（指令建房不受影响）
   say <房间ID|all> <内容>  向房间发送管理消息
   announce <内容>          向所有在线用户发送公告
   reload                   重新加载 server_config.yml
@@ -16,6 +18,7 @@ const HELP_TEXT = `可用命令：
 
 const USAGE = {
   create: '用法：create <房间ID>',
+  roomlock: '用法：roomlock on|off',
   say: '用法：say <房间ID|all> <内容>',
   announce: '用法：announce <内容>',
 };
@@ -40,17 +43,6 @@ function formatDuration(totalSeconds) {
   if (days > 0 || hours > 0 || minutes > 0) parts.push(`${minutes}分`);
   parts.push(`${seconds}秒`);
   return parts.join('');
-}
-
-function roomStateName(room) {
-  switch (room.state.kind) {
-    case 'SelectChart':
-      return '选谱中';
-    case 'WaitForReady':
-      return '准备中';
-    default:
-      return '游戏中';
-  }
 }
 
 function describeRoom(room) {
@@ -78,7 +70,7 @@ export function createConsoleHandler(state, tcp) {
       case 'status': {
         const memory = Math.round(process.memoryUsage().rss / 1024 / 1024);
         console.log(
-          `运行时间 ${formatDuration(process.uptime())} · 在线用户 ${state.users.size} · 连接 ${state.sessions.size} · 房间 ${state.rooms.size} · 内存 ${memory} MB`,
+          `运行时间 ${formatDuration(process.uptime())} · 在线用户 ${state.users.size} · 连接 ${state.sessions.size} · 房间 ${state.rooms.size} · 客户端建房 ${state.allowClientCreateRoom ? '允许' : '禁止'} · 内存 ${memory} MB`,
         );
         break;
       }
@@ -111,6 +103,33 @@ export function createConsoleHandler(state, tcp) {
         log.info(`console create room ${rest}`);
         console.log(
           `已创建房间 ${rest}${rest.startsWith('_') ? '（隐藏）' : ''}，第一个加入的玩家将成为房主`,
+        );
+        break;
+      }
+
+      case 'roomlock': {
+        const value = rest.toLowerCase();
+        if (!value) {
+          console.log(
+            `客户端建房当前${state.allowClientCreateRoom ? '允许' : '禁止'}，用法：roomlock on|off`,
+          );
+          break;
+        }
+        if (['on', 'enable', 'enabled', 'true', 'allow'].includes(value)) {
+          state.allowClientCreateRoom = true;
+        } else if (['off', 'disable', 'disabled', 'false', 'deny'].includes(value)) {
+          state.allowClientCreateRoom = false;
+        } else {
+          console.log(USAGE.roomlock);
+          break;
+        }
+        log.info(
+          `client room creation ${state.allowClientCreateRoom ? 'enabled' : 'disabled'} from console`,
+        );
+        console.log(
+          state.allowClientCreateRoom
+            ? '已允许玩家在客户端创建房间'
+            : '已禁止玩家在客户端创建房间（控制台、QQ、API 建房不受影响）',
         );
         break;
       }

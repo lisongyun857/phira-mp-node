@@ -19,6 +19,7 @@ const HELP_TEXT = `可用命令（需要以 # 开头）：
 #创建房间 <房间ID>   创建房间（管理员）
 #删除房间 <房间ID>   解散并删除房间（管理员）
 #管理消息 <房间ID|all> <内容>  发送管理消息（管理员）
+#建房开关 开|关       禁止/允许玩家在客户端创建房间（管理员）
 #公告 <内容>         向所有在线玩家发送公告（管理员）
 #状态                查看服务器状态
 #帮助                显示本帮助`;
@@ -220,11 +221,42 @@ function handleMessage(state, options, event, send) {
       break;
     }
 
+    case '建房开关':
+    case '房间创建':
+    case 'roomlock': {
+      if (!isAdmin) {
+        respond('权限不足：只有管理员 QQ 可以切换建房开关');
+        break;
+      }
+      const value = rest.toLowerCase();
+      if (!value) {
+        respond(`当前${state.allowClientCreateRoom ? '允许' : '禁止'}玩家在客户端创建房间`);
+        break;
+      }
+      if (['开', 'on', 'enable', 'enabled', 'true', '允许'].includes(value)) {
+        state.allowClientCreateRoom = true;
+      } else if (['关', 'off', 'disable', 'disabled', 'false', '禁止'].includes(value)) {
+        state.allowClientCreateRoom = false;
+      } else {
+        respond('用法：#建房开关 开|关');
+        break;
+      }
+      log.info(
+        `QQ bot: user ${userId} ${state.allowClientCreateRoom ? 'enabled' : 'disabled'} client room creation`,
+      );
+      respond(
+        state.allowClientCreateRoom
+          ? '已允许玩家在客户端创建房间'
+          : '已禁止玩家在客户端创建房间（控制台、QQ、API 建房不受影响）',
+      );
+      break;
+    }
+
     case '状态':
     case 'status': {
       const memory = Math.round(process.memoryUsage().rss / 1024 / 1024);
       respond(
-        `运行时间 ${formatDuration(process.uptime())} · 在线用户 ${state.users.size} · 连接 ${state.sessions.size} · 房间 ${state.rooms.size} · 内存 ${memory} MB`,
+        `运行时间 ${formatDuration(process.uptime())} · 在线用户 ${state.users.size} · 连接 ${state.sessions.size} · 房间 ${state.rooms.size} · 客户端建房 ${state.allowClientCreateRoom ? '允许' : '禁止'} · 内存 ${memory} MB`,
       );
       break;
     }

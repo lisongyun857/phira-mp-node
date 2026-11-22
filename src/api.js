@@ -100,8 +100,23 @@ async function handleRequest(state, req, res) {
       users: state.users.size,
       sessions: state.sessions.size,
       rooms: state.rooms.size,
+      allowClientCreateRoom: Boolean(state.allowClientCreateRoom),
       memoryMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
     });
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/room-creation') {
+    const body = await readJson(req);
+    if (typeof body.enabled !== 'boolean') {
+      fail(res, 400, 'enabled 必须是布尔值');
+      return;
+    }
+    state.allowClientCreateRoom = body.enabled;
+    log.info(
+      `API: client room creation ${state.allowClientCreateRoom ? 'enabled' : 'disabled'}`,
+    );
+    ok(res, { enabled: state.allowClientCreateRoom });
     return;
   }
 
