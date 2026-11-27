@@ -20,6 +20,8 @@ const DEFAULT_CONFIG = {
     host: '127.0.0.1',
     port: 3052,
     accessToken: '',
+    protectedPaths: [],
+    publicPaths: [],
   },
   login: {
     enabled: true,
@@ -213,6 +215,10 @@ export function loadConfig() {
       host: parseString(apiLines, 'host', DEFAULT_CONFIG.api.host),
       port: parseNumber(apiLines, 'port', DEFAULT_CONFIG.api.port),
       accessToken: parseString(apiLines, 'access_token', DEFAULT_CONFIG.api.accessToken),
+      // 需要校验 token 的接口；为空时全部公开
+      protectedPaths: parseList(apiLines, 'protected_paths') ?? [],
+      // 优先级更高的公开接口，可覆盖 protected_paths
+      publicPaths: parseList(apiLines, 'public_paths') ?? [],
     },
     login: {
       enabled: parseBool(loginLines, 'enabled', DEFAULT_CONFIG.login.enabled),

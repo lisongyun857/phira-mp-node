@@ -50,7 +50,7 @@ async function fetchJson(url) {
   return fetchWithTimeout(url);
 }
 
-async function fetchChart(id) {
+export async function fetchChart(id) {
   const cached = chartCache.get(id);
   if (cached && Date.now() - cached.at < CHART_CACHE_TTL) return cached.chart;
 

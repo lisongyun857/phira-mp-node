@@ -21,8 +21,17 @@ api:
   host: "127.0.0.1"
   # 监听端口
   port: 3052
-  # 访问令牌；对外暴露时必须设置，并同步到 AstrBot 插件配置
+  # 访问令牌；仅对下方 protected_paths 匹配的接口生效
   access_token: ""
+  # 需要携带 token 才能访问的接口（默认全部公开）
+  # 每行一项，支持 "METHOD /path" 或 "/path"（任意方法），* 为通配符
+  # 示例：
+  #   - POST /api/announce
+  #   - POST /api/rooms/*
+  #   - /api/login/*
+  protected_paths: []
+  # 优先级更高的公开接口，即使命中 protected_paths 也不校验 token
+  public_paths: []
 
 # Phira 账号绑定（QQ 用户通过一次性链接登录 Phira）
 # 公网访问路径由反向代理负责，例如把 https://你的域名/login/ 反代到 http://127.0.0.1:3052/login/

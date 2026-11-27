@@ -16,6 +16,15 @@ api:
   port: 3052
   # 对外暴露时务必设置一个足够随机的令牌
   access_token: "change-me"
+  # 需要校验 token 的接口，默认全部公开
+  # 每行一项，支持 "METHOD /path" 或 "/path"，* 为通配符
+  protected_paths:
+    - POST /api/announce
+    - POST /api/rooms/*
+    - /api/room/*
+  # 优先级更高，即使命中 protected_paths 也允许匿名访问
+  public_paths:
+    - GET /api/status
 
 login:
   enabled: true
@@ -36,13 +45,30 @@ HTTP API listening on http://127.0.0.1:3052
 
 ## 认证
 
-设置 `access_token` 后，所有请求都需要携带：
+默认**所有接口公开**，不校验令牌。只有同时满足以下条件的请求才需要携带令牌：
+
+1. `api.access_token` 非空；
+2. 请求匹配 `api.protected_paths` 中的某一项；
+3. 没有匹配 `api.public_paths`（公开优先）。
+
+路径规则：
+
+| 写法 | 含义 |
+| --- | --- |
+| `/api/status` | 任意方法匹配该路径 |
+| `GET /api/rooms` | 仅 GET 匹配 |
+| `POST /api/rooms/*` | POST 且路径以 `/api/rooms/` 开头 |
+| `/api/room/*` | 任意方法匹配 `/api/room/` 下的所有路径 |
+
+携带令牌：
 
 ```http
 Authorization: Bearer <access_token>
 ```
 
-也接受直接把令牌作为 `Authorization` 的值。令牌为空时不校验（仅建议在本机使用）。
+也接受直接把令牌作为 `Authorization` 的值。
+
+> 默认公开是为了方便同机部署的 AstrBot 插件。只要 API 端口可能被其他机器访问，就应设置 `access_token` 并把敏感接口（公告、建房删房、房间控制、绑定管理）加入 `protected_paths`。
 
 > API 令牌等同于管理员权限：可以查看隐藏房间、创建/删除房间、发送管理消息和公告。
 > 管理员 QQ 的校验由 AstrBot 插件完成（`admin_ids`），API 本身不区分 QQ 身份。
@@ -300,6 +326,88 @@ Authorization: Bearer <access_token>
 > Phira 协议没有“服务器强制踢出房间”的命令，被解散的玩家需要自行点击离开。
 > 服务端已兼容：不在房间时 `LeaveRoom` 也会返回成功。
 
+### `POST /api/room/action`
+
+通过 QQ 绑定关系控制房间。服务端根据 `platform + userId` 查出绑定的 Phira 账号，再校验该账号是否在线、是否在房间内、是否为房主。
+
+公共请求字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `platform` | 平台，默认 `qq` |
+| `userId` | 平台用户 ID |
+| `action` | 操作名，见下表 |
+| `roomId` | 可选。管理员操作不在自己所在的房间时必填 |
+| `admin` | 可选布尔。管理员 QQ 传 `true` 后可操作任意房间 |
+
+| action | 额外字段 | 权限 | 说明 |
+| --- | --- | --- | --- |
+| `info` | — | 房内成员 / 管理员 | 房间详情与成员列表 |
+| `lock` | `locked: true/false` | 房主 / 管理员 | 锁定或解锁房间 |
+| `cycle` | `enabled: true/false` | 房主 / 管理员 | 切换轮换模式 |
+| `select-chart` | `chartId: 12345` | 房主（需在房内） | 选择谱面 |
+| `start` | — | 房主（需在房内） | 开始游戏并进入准备阶段 |
+| `ready` | — | 房内成员 | 准备 |
+| `cancel-ready` | — | 房内成员 | 取消准备；房主取消会撤销本局 |
+| `abort` | — | 房内成员 | 中止当前游戏 |
+| `kick` | `targetId` 或 `targetName` | 房主 / 管理员 | 踢出玩家或旁观者 |
+| `set-host` | `targetId` 或 `targetName` | 房主 / 管理员 | 转让房主（目标必须是玩家） |
+| `dissolve` | — | 房主 / 管理员 | 解散房间并解除所有成员绑定 |
+
+示例：
+
+```json
+{
+  "platform": "qq",
+  "userId": "123456789",
+  "action": "lock",
+  "locked": true
+}
+```
+
+成功返回：
+
+```json
+{ "ok": true, "data": { "id": "room1", "locked": true } }
+```
+
+`info` 返回房间详情：
+
+```json
+{
+  "ok": true,
+  "data": {
+    "room": {
+      "id": "room1",
+      "state": "WaitForReady",
+      "stateName": "准备中",
+      "host": { "id": 10001, "name": "Alice" },
+      "chart": { "id": 12345, "name": "Example Chart" },
+      "locked": false,
+      "cycle": false,
+      "live": true,
+      "users": 2,
+      "monitors": 1,
+      "maxUsers": 8,
+      "isHost": true,
+      "members": [
+        { "id": 10001, "name": "Alice", "monitor": false, "online": true },
+        { "id": 10002, "name": "Bob", "monitor": false, "online": true },
+        { "id": 10003, "name": "Carol", "monitor": true, "online": true }
+      ]
+    }
+  }
+}
+```
+
+失败状态码：
+
+- `403`：未绑定 QQ、Phira 账号不在线、不是房主、或不在目标房间；
+- `404`：房间 / 目标玩家不存在；
+- `409`：当前阶段不允许该操作（如未选谱就点开始）。
+
+> `kick` 与 `dissolve` 会广播 `LeaveRoom` 并解除服务端的房间绑定；受 Phira 协议限制，被移出的客户端可能仍停留在房间界面，直到自己离开或重连。
+
 ### `POST /api/say`
 
 向指定房间或所有房间发送管理消息，消息会带 `【管理】` 前缀。
@@ -425,6 +533,16 @@ async def p_rooms(self, event: AstrMessageEvent):
 | --- | --- |
 | `/p房间` | 查看在线房间 |
 | `/p房间 全部` | 查看全部房间（含隐藏，管理员） |
+| `/p房间信息` | 查看自己所在房间的成员与状态（绑定） |
+| `/p锁定` / `/p解锁` | 锁定/解锁自己的房间（房主） |
+| `/p轮换 开\|关` | 切换轮换模式（房主） |
+| `/p选谱 <谱面ID>` | 选择谱面（房主） |
+| `/p开始` | 开始游戏（房主） |
+| `/p准备` / `/p取消准备` | 准备 / 取消准备（房内成员） |
+| `/p中止` | 中止当前游戏（房内成员） |
+| `/p踢人 <玩家ID或昵称>` | 踢出成员（房主） |
+| `/p转让房主 <玩家ID或昵称>` | 转让房主（房主） |
+| `/p解散 [房间ID]` | 解散房间（房主 / 管理员） |
 | `/p状态` | 查看服务器状态 |
 | `/p帮助` | 显示命令列表 |
 | `/p创建房间 <房间ID>` | 创建房间（管理员） |
@@ -436,12 +554,13 @@ async def p_rooms(self, event: AstrMessageEvent):
 ## 安全建议
 
 - 同机部署时保持 `host: "127.0.0.1"`，不要暴露到公网。
-- 跨机器部署时使用 `0.0.0.0`，同时设置强随机 `access_token`，并在防火墙/安全组中只放行 AstrBot 的 IP。
+- 跨机器部署时使用 `0.0.0.0`，同时设置强随机 `access_token`，并把需要保护的接口写入 `api.protected_paths`（默认全部公开）；在防火墙/安全组中只放行 AstrBot 的 IP。
+- `POST /api/room/action` 的 `admin` 字段由插件根据管理员 QQ 传入；如果 API 对公网暴露，必须用 `protected_paths` + 令牌保护该接口，否则任何人都能伪造管理员操作。
 - 不要把 API 端口直接暴露给公网，除非已经配置了令牌和访问控制。
 - 内置 `qq_bot` 与 AstrBot 插件会重复回复同一条指令，接入 AstrBot 后建议设置 `qq_bot.enabled: false`。
 
 ## 限制
 
-- HTTP API 只提供查询与管理，不包含游戏协议通信。
-- 删除房间后，客户端需要玩家手动离开房间（见上文说明）。
+- HTTP API 不包含游戏协议通信，但可以通过 `/api/room/action` 以房主身份改变房间状态。
+- 删除/踢出后，客户端需要玩家手动离开房间（见上文说明）。
 - 修改 `api` 配置后必须重启服务器。

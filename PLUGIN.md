@@ -194,26 +194,35 @@ https://phira.lisongyun.top/login/xxxxxxxx
 - **不保存** Phira 密码、access token、refresh token。
 - 绑定数据保存在服务端 `data/bindings.json`（已在 `.gitignore` 中忽略）。
 
-## 6. 后续房间指令的权限模型
+## 6. 房间控制 API
 
-后续增加房间操作时，建议统一采用：
+绑定账号后，插件可通过 `POST /api/room/action` 以房主身份控制房间。服务端根据 `platform + userId` 解析绑定的 Phira 账号，并校验其是否在线、是否在房间内、是否为房主。
 
 ```json
 {
   "platform": "qq",
   "userId": "123456789",
-  "roomId": "room1",
-  "action": "..."
+  "action": "lock",
+  "locked": true
 }
 ```
 
-服务端根据 `platform + userId` 查出绑定的 Phira 账号，再判断：
+| action | 额外字段 | 说明 |
+| --- | --- | --- |
+| `info` | — | 房间详情与成员列表 |
+| `lock` | `locked` | 锁定/解锁 |
+| `cycle` | `enabled` | 轮换模式 |
+| `select-chart` | `chartId` | 选谱（房主） |
+| `start` | — | 开始游戏（房主） |
+| `ready` / `cancel-ready` | — | 准备 / 取消准备 |
+| `abort` | — | 中止游戏 |
+| `kick` | `targetId` 或 `targetName` | 踢人（房主） |
+| `set-host` | `targetId` 或 `targetName` | 转让房主（房主） |
+| `dissolve` | — | 解散房间（房主） |
 
-- 该 Phira 账号是否在目标房间；
-- 是否是房主/管理员；
-- 该操作是否允许。
+管理员 QQ 可在请求中附带 `"admin": true`（由插件根据 `admin_ids` 决定）并指定 `roomId`，对任意房间执行管理操作。该字段依赖 API 令牌保护，部署时请把 `/api/room/*` 加入 `protected_paths`。
 
-插件端**不要**把 Phira ID 作为可伪造参数直接发给服务端；始终只发送 QQ 身份，由服务端解析绑定。
+插件端**不要**把 Phira ID 作为可伪造参数直接发给服务端；始终只发送 QQ 身份，由服务端解析绑定。完整指令说明见配套插件 `astrbot_plugin_phira_mp` 的 README。
 
 ## 7. 插件端示例（Python / aiohttp）
 
