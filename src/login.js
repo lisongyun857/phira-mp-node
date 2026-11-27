@@ -156,7 +156,7 @@ async function readBody(req, limit = 16 * 1024) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-async function authenticatePhira(config, email, password) {
+export async function authenticatePhira(config, email, password) {
   const endpoint = `${PHIRA_API}/login`;
   let response;
   try {
@@ -301,6 +301,16 @@ export class LoginManager {
 
   getBinding(platform, userId) {
     return this.bindings.get(`${platform}:${userId}`) || null;
+  }
+
+  /** 通过 Phira 用户 ID 反查 QQ 绑定（一个 Phira 账号最多绑定一个 QQ） */
+  getBindingByPhiraId(phiraId) {
+    const key = this.phiraIndex.get(String(phiraId));
+    return key ? this.bindings.get(key) || null : null;
+  }
+
+  listBindings() {
+    return [...this.bindings.values()];
   }
 
   bind(platform, userId, phira) {

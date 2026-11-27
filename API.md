@@ -101,6 +101,98 @@ location /login/ {
 
 `X-Forwarded-For` 为链式列表时，服务端从右向左跳过受信任代理，取第一个非代理地址，客户端无法通过伪造头部绕过。
 
+## 跨域（CORS）
+
+网页管理面板部署在独立域名时，把前端地址加入 `api.allowed_origins`：
+
+```yaml
+api:
+  allowed_origins:
+    - "https://phira-web.example.com"
+    - "https://admin.example.com"
+```
+
+`"*"` 表示允许任意来源（默认）。服务端会处理 `OPTIONS` 预检，并允许 `Authorization`、`Content-Type` 请求头。
+
+## 网页登录会话
+
+普通用户用 Phira 邮箱密码登录网页，服务端代理登录 Phira 并签发会话 token（有效期 7 天，内存存储，服务器重启后失效）。同一 IP 10 分钟内最多尝试 10 次。
+
+### `POST /api/web/login`
+
+```json
+{ "email": "user@example.com", "password": "******" }
+```
+
+成功返回：
+
+```json
+{
+  "ok": true,
+  "data": {
+    "token": "64 位十六进制字符串",
+    "expiresAt": 1730000000000,
+    "user": { "id": 10001, "name": "Alice", "avatar": null },
+    "binding": { "platform": "qq", "userId": "123456789", "phiraId": 10001 }
+  }
+}
+```
+
+### `GET /api/web/me`
+
+请求头 `Authorization: Bearer <token>`，返回当前用户、在线状态、QQ 绑定和所在房间详情：
+
+```json
+{
+  "ok": true,
+  "data": {
+    "user": { "id": 10001, "name": "Alice", "avatar": null },
+    "online": true,
+    "binding": null,
+    "room": { "id": "room1", "state": "SelectChart", "members": [] },
+    "expiresAt": 1730000000000
+  }
+}
+```
+
+### `POST /api/web/logout`
+
+请求头带会话 token，注销当前会话。
+
+### `POST /api/web/unbind`
+
+请求头带会话 token，解除该 Phira 账号当前的 QQ 绑定。
+
+### 使用会话控制房间
+
+`POST /api/room/action` 支持用 `sessionToken` 代替 `platform + userId`：
+
+```json
+{
+  "sessionToken": "<web token>",
+  "action": "lock",
+  "locked": true
+}
+```
+
+权限规则与 QQ 端一致：默认要求是房主；Phira 账号必须在线。
+
+## 管理接口
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /api/users` | 在线用户列表（ID、昵称、所在房间、是否旁观） |
+| `GET /api/bindings` | 全部 QQ-Phira 绑定 |
+| `GET /api/logs?lines=200` | 最新日志文件末尾若干行（最多 1000 行） |
+| `GET /api/room?id=room1` | 任意房间详情，不需要登录 |
+
+管理员操作 `/api/room/action` 时传 `"admin": true` 和 `roomId` 可操作任意房间。该标志仅在以下情况生效：
+
+- `api.access_token` 为空（默认，接口本身公开）；或
+- 请求携带了正确的 `Authorization: Bearer <access_token>`。
+
+配置了令牌后，把 `/api/room/*` 加入 `protected_paths`，未授权的请求会被 401 拦截，无法伪造管理员操作。
+
 ## 公开登录页面
 
 以下两个路径**不需要** API 令牌，供 QQ 用户打开浏览器完成 Phira 账号绑定：

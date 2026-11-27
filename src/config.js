@@ -23,6 +23,7 @@ const DEFAULT_CONFIG = {
     protectedPaths: [],
     publicPaths: [],
     trustedProxies: ['127.0.0.1', '::1'],
+    allowedOrigins: ['*'],
   },
   login: {
     enabled: true,
@@ -223,6 +224,8 @@ export function loadConfig() {
       // 受信任的反向代理地址，只有来自这些地址的 X-Forwarded-For / X-Real-IP 才会被采信
       trustedProxies:
         parseList(apiLines, 'trusted_proxies') ?? [...DEFAULT_CONFIG.api.trustedProxies],
+      // 允许跨域访问的前端来源，* 表示允许任意来源
+      allowedOrigins: parseList(apiLines, 'allowed_origins') ?? [...DEFAULT_CONFIG.api.allowedOrigins],
     },
     login: {
       enabled: parseBool(loginLines, 'enabled', DEFAULT_CONFIG.login.enabled),

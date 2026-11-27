@@ -1,10 +1,19 @@
 import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
 import { Room, ROOM_MAX_USERS } from './room.js';
 import { isValidRoomId } from './protocol/models.js';
-import { handleLoginPage, normalizeLoginIdentity } from './login.js';
+import { handleLoginPage, normalizeLoginIdentity, authenticatePhira } from './login.js';
 import { fetchChart } from './session.js';
 import { roomStateName } from './lobby.js';
 import { resolveClientIp } from './client-ip.js';
+import {
+  createWebSession,
+  getWebSession,
+  deleteWebSession,
+  checkLoginRate,
+  resetLoginRate,
+} from './web-auth.js';
 import { log } from './logger.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
@@ -17,6 +26,7 @@ const DEFAULT_OPTIONS = {
   protectedPaths: [],
   publicPaths: [],
   trustedProxies: ['127.0.0.1', '::1'],
+  allowedOrigins: ['*'],
 };
 
 function sendJson(res, status, payload) {
@@ -69,6 +79,54 @@ function matchesPatterns(patterns, method, pathname) {
 function hasToken(req, token) {
   const header = req.headers.authorization || '';
   return header === `Bearer ${token}` || header === token;
+}
+
+function bearerToken(req) {
+  const header = String(req.headers.authorization || '').trim();
+  if (header.toLowerCase().startsWith('bearer ')) return header.slice(7).trim();
+  return header;
+}
+
+function isOriginAllowed(origin, allowedOrigins) {
+  if (!origin) return false;
+  const list = Array.isArray(allowedOrigins) && allowedOrigins.length > 0 ? allowedOrigins : ['*'];
+  return list.some((item) => {
+    if (item === '*') return true;
+    if (item === origin) return true;
+    if (item.startsWith('*.')) {
+      try {
+        return new URL(origin).hostname.endsWith(item.slice(1));
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  });
+}
+
+/** 读取最新日志文件末尾若干行（最多 1000 行） */
+function readRecentLogs(limit) {
+  const logDir = 'log';
+  let files;
+  try {
+    files = fs.readdirSync(logDir).filter((name) => name.startsWith('phira-mp.'));
+  } catch {
+    return { file: null, lines: [] };
+  }
+  if (files.length === 0) return { file: null, lines: [] };
+  files.sort();
+  const file = path.join(logDir, files[files.length - 1]);
+  const stat = fs.statSync(file);
+  const start = Math.max(0, stat.size - 256 * 1024);
+  const buffer = Buffer.alloc(stat.size - start);
+  const fd = fs.openSync(file, 'r');
+  try {
+    fs.readSync(fd, buffer, 0, buffer.length, start);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const lines = buffer.toString('utf8').split('\n').filter(Boolean);
+  return { file, lines: lines.slice(-limit) };
 }
 
 function readJson(req) {
@@ -152,7 +210,7 @@ function roomDetailJson(room, actor) {
     users: room.users.length,
     monitors: room.monitors.length,
     maxUsers: ROOM_MAX_USERS,
-    isHost: Boolean(room.host && room.host.id === actor.id),
+    isHost: Boolean(actor && room.host && room.host.id === actor.id),
     members,
   };
 }
@@ -197,19 +255,34 @@ function dissolveRoom(state, room, notice) {
 }
 
 /**
- * QQ 绑定账号的房间控制。
- * 请求：{ platform, userId, action, roomId?, admin?, ... }
- * 权限：房主本人；admin=true 时（管理员 QQ）可操作任意房间。
+ * 房间控制。
+ * 身份来源（二选一）：
+ * - 网页登录会话：{ sessionToken }
+ * - QQ 绑定关系：{ platform, userId }
+ * 权限：房主本人；管理员（带有效 API token 时传 admin=true）可操作任意房间。
  */
-async function handleRoomAction(state, body, res) {
-  const identity = normalizeLoginIdentity(body.platform, body.userId);
-  if (!identity) throw new ApiError(400, 'platform/userId 不合法');
-  if (!state.login) throw new ApiError(503, '登录服务未初始化');
+async function handleRoomAction(state, body, res, options = {}) {
+  let phiraId;
+  let label;
 
-  const binding = state.login.getBinding(identity.platform, identity.userId);
-  if (!binding) throw new ApiError(403, '该 QQ 尚未绑定 Phira 账号，请先发送 /p登录');
+  if (body.sessionToken) {
+    const session = getWebSession(String(body.sessionToken));
+    if (!session) throw new ApiError(401, '登录已过期，请重新登录');
+    phiraId = session.phiraId;
+    label = `web:${phiraId}`;
+  } else {
+    const identity = normalizeLoginIdentity(body.platform, body.userId);
+    if (!identity) throw new ApiError(400, 'platform/userId 不合法');
+    if (!state.login) throw new ApiError(503, '登录服务未初始化');
 
-  const actor = state.users.get(binding.phiraId);
+    const binding = state.login.getBinding(identity.platform, identity.userId);
+    if (!binding) throw new ApiError(403, '该 QQ 尚未绑定 Phira 账号，请先发送 /p登录');
+
+    phiraId = binding.phiraId;
+    label = `${identity.platform}:${identity.userId}`;
+  }
+
+  const actor = state.users.get(phiraId);
   if (!actor) {
     throw new ApiError(403, '绑定的 Phira 账号当前不在线，请先在游戏中登录服务器');
   }
@@ -217,7 +290,7 @@ async function handleRoomAction(state, body, res) {
   const action = String(body.action ?? '').trim().toLowerCase();
   if (!action) throw new ApiError(400, '缺少 action');
 
-  const admin = body.admin === true;
+  const admin = body.admin === true && options.adminAllowed !== false;
   const requestedRoomId = String(body.roomId ?? '').trim();
   let room = actor.room;
   if (requestedRoomId) {
@@ -240,8 +313,6 @@ async function handleRoomAction(state, body, res) {
   const requireState = (kind, message) => {
     if (room.state.kind !== kind) throw new ApiError(409, message);
   };
-
-  const label = `${identity.platform}:${identity.userId}`;
 
   switch (action) {
     case 'info': {
@@ -418,6 +489,143 @@ async function handleRequest(state, req, res) {
     return;
   }
 
+  if (method === 'POST' && pathname === '/api/web/login') {
+    const body = await readJson(req);
+    const email = String(body.email ?? '').trim();
+    const password = String(body.password ?? '');
+    if (!email || !password) {
+      fail(res, 400, '请输入邮箱和密码');
+      return;
+    }
+    if (!state.login) {
+      fail(res, 503, '账号登录功能未启用');
+      return;
+    }
+    const ip = req.clientIp || '';
+    const rate = checkLoginRate(ip);
+    if (!rate.allowed) {
+      fail(res, 429, `尝试次数过多，请 ${rate.retryAfter} 秒后再试`);
+      return;
+    }
+    const result = await authenticatePhira(state.login.config, email, password);
+    if (!result.ok) {
+      log.warn(`web: login failed from ${ip || 'unknown'}: ${result.error}`);
+      fail(res, 401, result.error);
+      return;
+    }
+    resetLoginRate(ip);
+    const session = createWebSession(result.phira);
+    const binding = state.login.getBindingByPhiraId(result.phira.id) ?? null;
+    log.info(`web: ${ip || 'unknown'} logged in as phira ${result.phira.id}`);
+    ok(res, {
+      token: session.token,
+      expiresAt: session.expiresAt,
+      user: {
+        id: result.phira.id,
+        name: result.phira.name,
+        avatar: result.phira.avatar || null,
+      },
+      binding,
+    });
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/web/me') {
+    const session = getWebSession(bearerToken(req));
+    if (!session) {
+      fail(res, 401, '登录已过期，请重新登录');
+      return;
+    }
+    const binding = state.login ? state.login.getBindingByPhiraId(session.phiraId) : null;
+    const actor = state.users.get(session.phiraId);
+    ok(res, {
+      user: { id: session.phiraId, name: session.name, avatar: session.avatar },
+      online: Boolean(actor && actor.session),
+      binding,
+      room: actor && actor.room ? roomDetailJson(actor.room, actor) : null,
+      expiresAt: session.expiresAt,
+    });
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/web/logout') {
+    deleteWebSession(bearerToken(req));
+    ok(res, { loggedOut: true });
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/web/unbind') {
+    const session = getWebSession(bearerToken(req));
+    if (!session) {
+      fail(res, 401, '登录已过期，请重新登录');
+      return;
+    }
+    if (!state.login) {
+      fail(res, 503, '登录服务未初始化');
+      return;
+    }
+    const binding = state.login.getBindingByPhiraId(session.phiraId);
+    if (!binding) {
+      fail(res, 404, '当前账号没有绑定 QQ');
+      return;
+    }
+    const removed = state.login.unbind(binding.platform, binding.userId);
+    if (!removed) {
+      fail(res, 400, '解绑失败，请稍后重试');
+      return;
+    }
+    log.info(`web: unbound phira ${session.phiraId} from ${binding.platform}:${binding.userId}`);
+    ok(res, { unbound: true, platform: binding.platform, userId: binding.userId });
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/users') {
+    const users = [...state.users.values()]
+      .map((user) => ({
+        id: user.id,
+        name: user.name,
+        online: Boolean(user.session),
+        room: user.room ? user.room.id : null,
+        monitor: Boolean(user.monitor),
+      }))
+      .sort((a, b) => a.id - b.id);
+    ok(res, { users });
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/bindings') {
+    ok(res, { bindings: state.login ? state.login.listBindings() : [] });
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/logs') {
+    const requested = Number(url.searchParams.get('lines'));
+    const limit = Number.isInteger(requested) && requested > 0 ? Math.min(requested, 1000) : 200;
+    try {
+      const { file, lines } = readRecentLogs(limit);
+      ok(res, { file: file ? path.basename(file) : null, lines });
+    } catch (e) {
+      log.warn(`API: read logs failed: ${e.message}`);
+      fail(res, 500, '读取日志失败');
+    }
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/room') {
+    const id = String(url.searchParams.get('id') ?? '').trim();
+    if (!id) {
+      fail(res, 400, '缺少房间 ID');
+      return;
+    }
+    const room = state.rooms.get(id);
+    if (!room) {
+      fail(res, 404, `房间 ${id} 不存在`);
+      return;
+    }
+    ok(res, { room: roomDetailJson(room, null) });
+    return;
+  }
+
   if (method === 'POST' && pathname === '/api/login/link') {
     const body = await readJson(req);
     const identity = normalizeLoginIdentity(body.platform, body.userId);
@@ -494,7 +702,9 @@ async function handleRequest(state, req, res) {
 
   if (method === 'POST' && pathname === '/api/room/action') {
     const body = await readJson(req);
-    await handleRoomAction(state, body, res);
+    await handleRoomAction(state, body, res, {
+      adminAllowed: !req.apiTokenConfigured || req.apiAuthorized,
+    });
     return;
   }
 
@@ -622,6 +832,24 @@ export function startApi(state) {
     // 解析真实客户端 IP（反向代理场景下读取 X-Forwarded-For / X-Real-IP）
     const clientIp = resolveClientIp(req, config.trustedProxies);
     req.clientIp = clientIp;
+    req.apiAuthorized = hasToken(req, config.accessToken);
+    req.apiTokenConfigured = Boolean(config.accessToken);
+
+    // 跨域支持：前端部署在独立域名时使用
+    const origin = req.headers.origin;
+    if (origin && isOriginAllowed(origin, config.allowedOrigins)) {
+      const allowAll = (config.allowedOrigins || []).includes('*');
+      res.setHeader('Access-Control-Allow-Origin', allowAll ? '*' : origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Max-Age', '86400');
+    }
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
 
     if (url.pathname === '/login' || url.pathname.startsWith('/login/')) {
       handleLoginPage(state, req, res, url).catch((e) => {
