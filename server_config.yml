@@ -1,68 +1,136 @@
-# 与 phira-mp-server 的 server_config.yml 等价
+# ============================================================================
+# phira-mp-node 服务器配置
+# 每个配置项下方都给出了示例写法（以 # 注释）；需要时取消注释即可。
+# 修改后需重启服务生效（控制台 reload 只会重新加载公告等部分配置）。
+# ============================================================================
+
+# 允许以旁观者身份加入任意房间的 Phira 用户 ID
 monitors:
   - 2
+  # 示例：添加更多旁观者白名单
+  # - 10001
+  # - 10002
 
-# 玩家连接服务器时展示的公告（每条一行聊天消息）
+# 玩家连接服务器时自动展示的公告，每条一行聊天消息
 announcements:
   - "欢迎来到 Phira 多人服务器"
   - "房间名以 _ 开头时不会出现在在线房间列表中"
+  # 示例：添加群号或活动公告
+  # - "官方群：123456789"
+  # - "禁止在房间内发布广告"
 
-# 连接时是否展示在线房间列表
+# 玩家连接时是否展示在线房间列表（true / false）
 show_online_rooms: true
-# 是否允许玩家在客户端创建房间；控制台、QQ 指令和 HTTP API 建房不受此开关影响
+
+# 是否允许玩家在客户端创建房间（true / false）
+# 控制台、QQ 指令和 HTTP API 建房不受此开关影响
 allow_client_create_room: true
 
-# HTTP API：供 AstrBot 等外部程序查询和管理服务器
-# 修改后需要重启服务器生效
+# ============================================================================
+# HTTP API：供 AstrBot 插件、管理面板、脚本等外部程序调用
+# ============================================================================
 api:
-  # 是否启用
+  # 是否启用 HTTP API（true / false）
   enabled: true
-  # 监听地址；AstrBot 与服务器不在同一台机器时改为 0.0.0.0
-  host: "127.0.0.1"
-  # 监听端口
-  port: 3052
-  # 访问令牌；仅对下方 protected_paths 匹配的接口生效
-  access_token: ""
-  # 需要携带 token 才能访问的接口（默认全部公开）
-  # 每行一项，支持 "METHOD /path" 或 "/path"（任意方法），* 为通配符
-  # 示例：
-  #   - POST /api/announce
-  #   - POST /api/rooms/*
-  #   - /api/login/*
-  protected_paths: []
-  # 优先级更高的公开接口，即使命中 protected_paths 也不校验 token
-  public_paths: []
 
-# Phira 账号绑定（QQ 用户通过一次性链接登录 Phira）
-# 公网访问路径由反向代理负责，例如把 https://你的域名/login/ 反代到 http://127.0.0.1:3052/login/
+  # 监听地址
+  # 示例：
+  #   "127.0.0.1"  仅本机访问（推荐，配合反向代理）
+  #   "0.0.0.0"    允许其他机器访问（务必设置 access_token）
+  host: "127.0.0.1"
+
+  # 监听端口
+  # 示例：3052、8080
+  port: 3052
+
+  # 访问令牌
+  # 为空表示不校验令牌；只有命中 protected_paths 的接口才会校验
+  # 示例："请换成一个足够随机的长字符串"
+  access_token: ""
+
+  # 需要携带 token 才能访问的接口，默认全部公开（留空即全部公开）
+  # 每行一项，支持 "METHOD /path" 或 "/path"（任意方法），* 为通配符
+  protected_paths: []
+  # 示例 1：只保护敏感管理接口，其余保持公开
+  # protected_paths:
+  #   - POST /api/announce
+  #   - POST /api/rooms/create
+  #   - POST /api/rooms/delete
+  #   - POST /api/room/action
+  #   - DELETE /api/login/binding
+  # 示例 2：所有接口都必须带 token
+  # protected_paths:
+  #   - /*
+  # 示例 3：保护整个房间控制接口
+  # protected_paths:
+  #   - /api/room/*
+
+  # 即使命中 protected_paths 也强制公开的接口（优先级更高）
+  public_paths: []
+  # 示例：
+  # public_paths:
+  #   - GET /api/status
+  #   - GET /api/rooms
+
+# ============================================================================
+# Phira 账号绑定：QQ 用户通过一次性链接登录 Phira
+# 反向代理需把 <public_url>/login/ 转发到 http://127.0.0.1:3052/login/
+# ============================================================================
 login:
-  # 是否启用账号绑定
+  # 是否启用账号绑定（true / false）
   enabled: true
+
   # 生成登录链接时使用的公网地址（末尾不要带 /）
+  # 示例："https://phira.example.com"
   public_url: "https://phira.lisongyun.top"
+
   # 登录链接有效期（秒）
+  # 示例：300（5 分钟）、600（10 分钟）、1800（30 分钟）
   link_ttl: 600
-  # 单个链接允许的密码尝试次数
+
+  # 单个登录链接允许的密码尝试次数
+  # 示例：3、5、10
   max_attempts: 5
-  # QQ/Phira 绑定数据文件（不会保存密码或 Phira token）
+
+  # QQ/Phira 绑定数据文件（相对项目根目录；不会保存密码或 Phira token）
+  # 示例："data/bindings.json"
   bindings_file: "data/bindings.json"
+
   # 调用 Phira /login 时上报的客户端版本与渠道
+  # 示例：client_version: "0.6.7" / client_flavor: "none"
   client_version: "0.6.7"
   client_flavor: "none"
 
-# QQ 机器人（NapCat 反向 WebSocket：NapCat 连接本服务器）
-# 接入 AstrBot 后建议将 enabled 设为 false，避免两个机器人重复回复
+# ============================================================================
+# QQ 机器人（NapCat 反向 WebSocket：由 NapCat 连接本服务器）
+# 接入 AstrBot 插件后建议把 enabled 设为 false，避免两个机器人重复回复
+# ============================================================================
 qq_bot:
+  # 是否启用内置 QQ 机器人（true / false）
   enabled: true
-  # 本服务器监听的 WebSocket 端口，NapCat 里填 ws://服务器地址:3001
+
+  # 本服务器监听的 WebSocket 端口，NapCat 中填 ws://服务器地址:3001
+  # 示例：3001、8080
   port: 3001
-  # 可选，和 NapCat 的 access token 保持一致；留空表示不校验
+
+  # 与 NapCat 的 access token 保持一致；留空表示不校验
+  # 示例："请换成与 NapCat 相同的随机字符串"
   access_token: ""
-  # 允许管理房间的 QQ 号（创建房间、管理消息、公告）
+
+  # 允许执行管理指令的 QQ 号
   admin_qq:
     - 10001
+    # 示例：添加更多管理员
+    # - 10002
+    # - 10003
+
   # 定时推送在线房间的 QQ 群号
   group_ids:
     - 123456
+    # 示例：添加更多群
+    # - 123456789
+    # - 987654321
+
   # 推送间隔（秒），0 表示关闭定时推送
+  # 示例：60（每分钟）、300（每 5 分钟）、0（关闭）
   report_interval: 300
