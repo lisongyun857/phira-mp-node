@@ -22,6 +22,7 @@ const DEFAULT_CONFIG = {
     accessToken: '',
     protectedPaths: [],
     publicPaths: [],
+    trustedProxies: ['127.0.0.1', '::1'],
   },
   login: {
     enabled: true,
@@ -219,6 +220,9 @@ export function loadConfig() {
       protectedPaths: parseList(apiLines, 'protected_paths') ?? [],
       // 优先级更高的公开接口，可覆盖 protected_paths
       publicPaths: parseList(apiLines, 'public_paths') ?? [],
+      // 受信任的反向代理地址，只有来自这些地址的 X-Forwarded-For / X-Real-IP 才会被采信
+      trustedProxies:
+        parseList(apiLines, 'trusted_proxies') ?? [...DEFAULT_CONFIG.api.trustedProxies],
     },
     login: {
       enabled: parseBool(loginLines, 'enabled', DEFAULT_CONFIG.login.enabled),

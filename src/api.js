@@ -4,6 +4,7 @@ import { isValidRoomId } from './protocol/models.js';
 import { handleLoginPage, normalizeLoginIdentity } from './login.js';
 import { fetchChart } from './session.js';
 import { roomStateName } from './lobby.js';
+import { resolveClientIp } from './client-ip.js';
 import { log } from './logger.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
@@ -15,6 +16,7 @@ const DEFAULT_OPTIONS = {
   accessToken: '',
   protectedPaths: [],
   publicPaths: [],
+  trustedProxies: ['127.0.0.1', '::1'],
 };
 
 function sendJson(res, status, payload) {
@@ -617,9 +619,13 @@ export function startApi(state) {
 
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://localhost');
+    // 解析真实客户端 IP（反向代理场景下读取 X-Forwarded-For / X-Real-IP）
+    const clientIp = resolveClientIp(req, config.trustedProxies);
+    req.clientIp = clientIp;
+
     if (url.pathname === '/login' || url.pathname.startsWith('/login/')) {
       handleLoginPage(state, req, res, url).catch((e) => {
-        log.error(`login: unhandled error: ${e.stack || e.message}`);
+        log.error(`login: unhandled error from ${clientIp}: ${e.stack || e.message}`);
         if (!res.headersSent) {
           res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
           res.end('internal server error');
@@ -629,11 +635,12 @@ export function startApi(state) {
     }
     const method = req.method || 'GET';
     if (requiresToken(method, url.pathname) && !hasToken(req, config.accessToken)) {
+      log.warn(`API: unauthorized ${method} ${url.pathname} from ${clientIp}`);
       fail(res, 401, 'unauthorized');
       return;
     }
     handleRequest(state, req, res).catch((e) => {
-      log.warn(`API: ${req.method} ${req.url} failed: ${e.message}`);
+      log.warn(`API: ${req.method} ${req.url} from ${clientIp} failed: ${e.message}`);
       if (!res.headersSent) fail(res, e.status || 400, e.message);
     });
   });

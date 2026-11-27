@@ -73,6 +73,34 @@ Authorization: Bearer <access_token>
 > API 令牌等同于管理员权限：可以查看隐藏房间、创建/删除房间、发送管理消息和公告。
 > 管理员 QQ 的校验由 AstrBot 插件完成（`admin_ids`），API 本身不区分 QQ 身份。
 
+## 反向代理与客户端 IP
+
+经过 Nginx 等反向代理时，服务端会从 `X-Forwarded-For` / `X-Real-IP` 解析真实客户端 IP，用于日志中的登录尝试、令牌校验失败和接口错误。
+
+只有请求来自 `api.trusted_proxies` 中的地址时才会采信代理头，默认是 `127.0.0.1` 和 `::1`（同机 Nginx）。代理在其他机器时，把代理的内网地址加入列表；设为 `[]` 表示完全忽略代理头。
+
+```yaml
+api:
+  trusted_proxies:
+    - 127.0.0.1
+    - "::1"
+    # - 10.0.0.2   代理在其他机器时加入
+```
+
+Nginx 建议配置：
+
+```nginx
+location /login/ {
+    proxy_pass http://127.0.0.1:3052;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+`X-Forwarded-For` 为链式列表时，服务端从右向左跳过受信任代理，取第一个非代理地址，客户端无法通过伪造头部绕过。
+
 ## 公开登录页面
 
 以下两个路径**不需要** API 令牌，供 QQ 用户打开浏览器完成 Phira 账号绑定：

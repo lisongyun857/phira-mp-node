@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { log } from './logger.js';
+import { resolveClientIp } from './client-ip.js';
 
 const PHIRA_API = 'https://phira.5wyxi.com';
 const CODE_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
@@ -280,13 +281,15 @@ export class LoginManager {
     return session;
   }
 
-  takeAttempt(code) {
+  takeAttempt(code, ip = '') {
     const session = this.getSession(code);
     if (!session) return { ok: false, expired: true };
     session.attempts += 1;
     if (session.attempts > Math.max(1, Number(this.config.maxAttempts) || DEFAULT_LOGIN.maxAttempts)) {
       this.sessions.delete(code);
-      log.warn(`login: too many attempts for ${session.platform}:${session.userId}`);
+      log.warn(
+        `login: too many attempts for ${session.platform}:${session.userId}${ip ? ` from ${ip}` : ''}`,
+      );
       return { ok: false, expired: true };
     }
     return { ok: true, session };
@@ -418,6 +421,8 @@ export class LoginManager {
 export async function handleLoginPage(state, req, res, url) {
   try {
     const manager = state.login;
+    const clientIp =
+      req.clientIp || resolveClientIp(req, state.config?.api?.trustedProxies);
     if (!manager) {
       sendHtml(res, 503, errorPage('服务不可用', '登录服务尚未初始化。'));
       return;
@@ -492,7 +497,7 @@ export async function handleLoginPage(state, req, res, url) {
       return;
     }
 
-    const attempt = manager.takeAttempt(code);
+    const attempt = manager.takeAttempt(code, clientIp);
     if (!attempt.ok) {
       sendHtml(
         res,
@@ -504,17 +509,24 @@ export async function handleLoginPage(state, req, res, url) {
 
     const result = await authenticatePhira(manager.config, email, password);
     if (!result.ok) {
+      log.warn(
+        `login: authentication failed for ${session.platform}:${session.userId} from ${clientIp}`,
+      );
       sendHtml(res, 200, formPage(session, { error: result.error, email }));
       return;
     }
 
     const bound = manager.bind(session.platform, session.userId, result.phira);
     if (!bound.ok) {
+      log.warn(
+        `login: bind failed for ${session.platform}:${session.userId} from ${clientIp}: ${bound.error}`,
+      );
       sendHtml(res, 200, formPage(session, { error: bound.error, email }));
       return;
     }
 
     manager.deleteSession(code);
+    log.info(`login: bound ${session.platform}:${session.userId} from ${clientIp}`);
     sendHtml(res, 200, successPage(bound.binding));
   } catch (e) {
     log.error(`login: page error: ${e.stack || e.message}`);
