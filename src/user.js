@@ -42,6 +42,16 @@ export class User {
     }
   }
 
+  /** 发送已编码的数据帧，避免同一广播对每个接收者重复编码 */
+  trySendFrame(frame, realtime = false) {
+    if (this.session) {
+      this.session.sendFrame(frame, realtime);
+      return true;
+    }
+    log.warn(`sending frame to dangling user ${this.id}`);
+    return false;
+  }
+
   /**
    * 会话丢失后的处理：
    * - 游戏中直接退出房间

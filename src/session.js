@@ -1,4 +1,4 @@
-import { decodeClientCommand, encodeServerCommand, ok, err } from './protocol/models.js';
+import { decodeClientCommand, encodeServerFrame, ok, err } from './protocol/models.js';
 import { User } from './user.js';
 import { Room } from './room.js';
 import { buildLobbyMessages } from './lobby.js';
@@ -7,36 +7,71 @@ import { log } from './logger.js';
 
 const HOST = 'https://phira.5wyxi.com';
 const MAX_PACKET_SIZE = 2 * 1024 * 1024;
-const HEARTBEAT_DISCONNECT_TIMEOUT = 10_000;
+/** 心跳超时：放宽到 30 秒，减少移动网络抖动导致的误判断线 */
+const HEARTBEAT_DISCONNECT_TIMEOUT = 30_000;
+/** 实时数据（Touches/Judges）允许的发送积压，超过则丢弃，避免慢客户端撑爆内存 */
+const MAX_REALTIME_BACKLOG = 512 * 1024;
+/** 控制消息允许的发送积压，超过说明对端长期不读，主动断开 */
+const MAX_CTRL_BACKLOG = 8 * 1024 * 1024;
+/** 单会话待处理命令上限，防止恶意/异常客户端无限堆积 */
+const MAX_PENDING_COMMANDS = 2048;
+/** 外部 API 超时，避免网络卡住单个会话的命令队列 */
+const API_TIMEOUT = 8_000;
+const CHART_CACHE_TTL = 5 * 60 * 1000;
+const CHART_CACHE_MAX = 200;
+const PONG_FRAME = encodeServerFrame({ type: 'Pong' });
 
-function encodeUleb(value) {
-  const bytes = [];
-  let n = value;
-  do {
-    let byte = n & 0x7f;
-    n = Math.floor(n / 128);
-    if (n !== 0) byte |= 0x80;
-    bytes.push(byte);
-  } while (n !== 0);
-  return Buffer.from(bytes);
-}
+/** 选谱结果缓存，减少重复请求 Phira API */
+const chartCache = new Map();
 
-async function fetchJson(url) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`request failed with status ${res.status}`);
+async function fetchWithTimeout(url, options = {}, timeout = API_TIMEOUT) {
+  const res = await fetch(url, { ...options, signal: AbortSignal.timeout(timeout) });
+  if (!res.ok) {
+    const error = new Error(`request failed with status ${res.status}`);
+    error.status = res.status;
+    throw error;
+  }
   return res.json();
 }
 
-async function fetchChart(id) {
-  const url = `${HOST}/chart/${id}`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    log.warn(`chart ${id} fetch failed: HTTP ${res.status} (${url})`);
-    throw new Error(`chart ${id} unavailable on Phira (HTTP ${res.status})`);
+async function fetchMe(token) {
+  const options = { headers: { Authorization: `Bearer ${token}` } };
+  try {
+    return await fetchWithTimeout(`${HOST}/me`, options);
+  } catch (e) {
+    // 仅在网络层失败时重试一次；令牌被拒绝时直接返回
+    if (e.status) throw e;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return fetchWithTimeout(`${HOST}/me`, options);
   }
-  const chart = await res.json();
-  log.debug(`chart ${id} -> ${chart.name}`);
-  return chart;
+}
+
+async function fetchJson(url) {
+  return fetchWithTimeout(url);
+}
+
+async function fetchChart(id) {
+  const cached = chartCache.get(id);
+  if (cached && Date.now() - cached.at < CHART_CACHE_TTL) return cached.chart;
+
+  const url = `${HOST}/chart/${id}`;
+  try {
+    const chart = await fetchWithTimeout(url);
+    if (log.isEnabled('debug')) log.debug(`chart ${id} -> ${chart.name}`);
+    chartCache.set(id, { chart, at: Date.now() });
+    if (chartCache.size > CHART_CACHE_MAX) {
+      chartCache.delete(chartCache.keys().next().value);
+    }
+    return chart;
+  } catch (e) {
+    // 网络抖动时回退到过期缓存，避免选谱失败
+    if (cached) {
+      log.warn(`chart ${id} fetch failed (${e.message}), using cached result`);
+      return cached.chart;
+    }
+    log.warn(`chart ${id} fetch failed: ${e.message} (${url})`);
+    throw new Error(`chart ${id} unavailable on Phira (${e.message})`);
+  }
 }
 
 function requireRoom(user) {
@@ -75,25 +110,41 @@ export class Session {
     this.buffer = Buffer.alloc(0);
     /** 串行处理包，保证同一会话内命令顺序执行 */
     this.queue = Promise.resolve();
+    /** 队列中待处理的命令数量 */
+    this.pending = 0;
 
     socket.setNoDelay(true);
+    socket.setKeepAlive(true, 30_000);
     socket.on('data', (chunk) => this.onData(chunk));
     socket.on('error', (e) => log.warn(`session ${this.id} socket error: ${e.message}`));
-    socket.on('close', () => log.debug(`session ${this.id} socket closed`));
-
-    // 与 Rust 版本一致：超过 10 秒没有收到任何数据则判定掉线
-    this.heartbeatTimer = setInterval(() => this.checkHeartbeat(), 1000);
+    socket.on('close', () => this.markLost());
   }
 
+  /** 编码并发送一条命令（低频控制消息） */
   send(cmd) {
     if (this.lost || this.socket.destroyed) return;
     try {
-      const payload = encodeServerCommand(cmd);
-      const header = encodeUleb(payload.length);
-      this.socket.write(Buffer.concat([header, payload]));
+      this.sendFrame(encodeServerFrame(cmd));
     } catch (e) {
       log.error(`failed to send ${cmd.type} to ${this.id}: ${e.message}`);
     }
+  }
+
+  /**
+   * 直接发送已编码的数据帧，多处广播时只需编码一次。
+   * realtime=true 时积压较多会丢弃该帧：触控/判定允许丢包，优先保证连接不被拖垮。
+   */
+  sendFrame(frame, realtime = false) {
+    if (this.lost || this.socket.destroyed) return false;
+    const backlog = this.socket.writableLength;
+    if (backlog > (realtime ? MAX_REALTIME_BACKLOG : MAX_CTRL_BACKLOG)) {
+      if (realtime) return false;
+      log.warn(`session ${this.id} send backlog ${backlog}, dropping connection`);
+      this.markLost();
+      return false;
+    }
+    this.socket.write(frame);
+    return true;
   }
 
   onData(chunk) {
@@ -135,32 +186,65 @@ export class Session {
       }
       if (this.buffer.length < index + length) return;
 
-      const payload = Buffer.from(this.buffer.subarray(index, index + length));
+      // 同步解码后再续读，无需复制载荷；payload 在本轮循环内即被消费
+      const payload = this.buffer.subarray(index, index + length);
       this.buffer = this.buffer.subarray(index + length);
-
-      this.queue = this.queue
-        .then(() => this.handlePacket(payload))
-        .catch((e) => log.error(`session ${this.id} handler error: ${e.stack || e}`));
+      this.dispatch(payload);
     }
   }
 
-  async handlePacket(payload) {
-    this.lastRecv = Date.now();
+  /** 同步解码并分派单个数据包 */
+  dispatch(payload) {
     if (this.panicked) return;
 
     let cmd;
     try {
       cmd = decodeClientCommand(payload);
     } catch (e) {
-      log.warn(`session ${this.id}: invalid packet: ${e.message}`);
-      this.failConnection();
+      if (e && e.unsupportedCommand) {
+        // 客户端版本更新带来的未知命令：忽略该包，保持连接
+        log.warn(`session ${this.id}: unsupported command ${e.tag}, ignored`);
+      } else {
+        log.warn(`session ${this.id}: invalid packet: ${e.message}, ignored`);
+      }
       return;
     }
 
     if (cmd.type === 'Ping') {
-      this.send({ type: 'Pong' });
+      // 心跳立即回包，不进入队列，降低延迟与队列压力
+      if (!this.lost && !this.socket.destroyed) this.socket.write(PONG_FRAME);
       return;
     }
+
+    // 触控/判定是高频实时数据：已鉴权时同步处理，避免每包创建 Promise
+    if (cmd.type === 'Touches' || cmd.type === 'Judges') {
+      if (!this.waitingForAuth && this.user && !this.panicked) {
+        try {
+          processRealtime(this.user, cmd);
+        } catch (e) {
+          log.error(`session ${this.id} realtime error: ${e.stack || e}`);
+        }
+      }
+      return;
+    }
+
+    if (this.pending >= MAX_PENDING_COMMANDS) {
+      log.warn(`session ${this.id}: too many pending commands, closing`);
+      this.failConnection();
+      return;
+    }
+
+    this.pending += 1;
+    this.queue = this.queue
+      .then(() => this.handleCommand(cmd))
+      .catch((e) => log.error(`session ${this.id} handler error: ${e.stack || e}`))
+      .then(() => {
+        this.pending -= 1;
+      });
+  }
+
+  async handleCommand(cmd) {
+    if (this.panicked) return;
 
     if (this.waitingForAuth) {
       if (cmd.type !== 'Authenticate') {
@@ -177,15 +261,11 @@ export class Session {
   }
 
   async authenticate(token) {
-    log.debug(`session ${this.id}: authenticate ${token}`);
+    if (log.isEnabled('debug')) log.debug(`session ${this.id}: authenticate ${token}`);
 
     let info;
     try {
-      const res = await fetch(`${HOST}/me`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) throw new Error(`status ${res.status}`);
-      info = await res.json();
+      info = await fetchMe(token);
     } catch (e) {
       log.warn(`failed to fetch info: ${e.message}`);
       this.send({ type: 'Authenticate', result: err('failed to fetch info') });
@@ -193,7 +273,7 @@ export class Session {
       return;
     }
 
-    log.debug(`session ${this.id} <- ${JSON.stringify(info)}`);
+    if (log.isEnabled('debug')) log.debug(`session ${this.id} <- ${JSON.stringify(info)}`);
 
     const lang = normalizeLang(info.language);
     let user = this.server.users.get(info.id);
@@ -237,9 +317,10 @@ export class Session {
     setTimeout(() => this.markLost(), 3000).unref();
   }
 
-  checkHeartbeat() {
+  checkHeartbeat(now = Date.now()) {
     if (this.lost) return;
-    if (Date.now() - this.lastRecv > HEARTBEAT_DISCONNECT_TIMEOUT) {
+    if (now - this.lastRecv > HEARTBEAT_DISCONNECT_TIMEOUT) {
+      log.warn(`session ${this.id} heartbeat timeout`);
       this.markLost();
     }
   }
@@ -247,7 +328,6 @@ export class Session {
   markLost() {
     if (this.lost) return;
     this.lost = true;
-    clearInterval(this.heartbeatTimer);
     log.warn(`lost connection with ${this.id}`);
 
     this.socket.destroy();
@@ -258,6 +338,26 @@ export class Session {
     if (this.user && this.user.session === this) {
       this.user.dangle();
     }
+  }
+}
+
+/**
+ * 高频实时数据（触控/判定）：同步转发给旁观者，不进入命令队列。
+ * 仅在房间处于 live 状态时转发，静默丢弃其余情况，避免刷日志。
+ */
+function processRealtime(user, cmd) {
+  const room = user.room;
+  if (!room || !room.live) return;
+
+  if (cmd.type === 'Touches') {
+    if (cmd.frames.length === 0) return;
+    user.gameTime = cmd.frames[cmd.frames.length - 1].time;
+    room.broadcastMonitors({ type: 'Touches', player: user.id, frames: cmd.frames });
+    return;
+  }
+
+  if (cmd.type === 'Judges') {
+    room.broadcastMonitors({ type: 'Judges', player: user.id, judges: cmd.judges });
   }
 }
 
@@ -279,38 +379,6 @@ async function processCommand(user, cmd) {
         }),
       };
 
-    case 'Touches': {
-      const room = user.room;
-      if (!room) {
-        log.warn('no room');
-        return null;
-      }
-      if (!room.live) {
-        log.warn('received touch events in non-live mode');
-        return null;
-      }
-      log.debug(`received ${cmd.frames.length} touch events from ${user.id}`);
-      if (cmd.frames.length > 0) {
-        user.gameTime = cmd.frames[cmd.frames.length - 1].time;
-      }
-      room.broadcastMonitors({ type: 'Touches', player: user.id, frames: cmd.frames });
-      return null;
-    }
-
-    case 'Judges': {
-      const room = user.room;
-      if (!room) {
-        log.warn('no room');
-        return null;
-      }
-      if (!room.live) {
-        log.warn('received judge events in non-live mode');
-        return null;
-      }
-      log.debug(`received ${cmd.judges.length} judge events from ${user.id}`);
-      room.broadcastMonitors({ type: 'Judges', player: user.id, judges: cmd.judges });
-      return null;
-    }
 
     case 'CreateRoom':
       return {
@@ -422,7 +490,7 @@ async function processCommand(user, cmd) {
         result: await attempt(async () => {
           const room = requireRoomState(user, 'SelectChart');
           room.checkHost(user);
-          log.debug(`room ${room.id}: user ${user.id} select chart ${cmd.id}`);
+          if (log.isEnabled('debug')) log.debug(`room ${room.id}: user ${user.id} select chart ${cmd.id}`);
           const chart = await fetchChart(cmd.id);
           room.sendMessage({
             type: 'SelectChart',
@@ -442,7 +510,7 @@ async function processCommand(user, cmd) {
           const room = requireRoomState(user, 'SelectChart');
           room.checkHost(user);
           if (!room.chart) throw new Error(t(user.lang, 'start-no-chart-selected'));
-          log.debug(`room ${room.id}: wait for ready`);
+          if (log.isEnabled('debug')) log.debug(`room ${room.id}: wait for ready`);
           room.resetGameTime();
           room.sendMessage({ type: 'GameStart', user: user.id });
           room.state = {
@@ -507,7 +575,9 @@ async function processCommand(user, cmd) {
           const room = requireRoom(user);
           const record = await fetchJson(`${HOST}/record/${cmd.id}`);
           if (record.player !== user.id) throw new Error('invalid record');
-          log.debug(`room ${room.id}: user ${user.id} played: ${JSON.stringify(record)}`);
+          if (log.isEnabled('debug')) {
+            log.debug(`room ${room.id}: user ${user.id} played: ${JSON.stringify(record)}`);
+          }
           room.sendMessage({
             type: 'Played',
             user: user.id,

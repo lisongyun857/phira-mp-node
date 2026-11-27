@@ -88,8 +88,13 @@ export function decodeClientCommand(payload) {
       return { type: 'Played', id: r.i32() };
     case 15:
       return { type: 'Abort' };
-    default:
-      throw new Error(`invalid enum: ${tag}`);
+    default: {
+      // 客户端版本更新可能带来未知命令：标记后由上层忽略，不因此断开连接
+      const error = new Error(`unsupported command: ${tag}`);
+      error.unsupportedCommand = true;
+      error.tag = tag;
+      throw error;
+    }
   }
 }
 
@@ -317,4 +322,22 @@ export function encodeServerCommand(cmd) {
       throw new Error(`invalid server command: ${cmd.type}`);
   }
   return w.finish();
+}
+
+const ULEB_HEADER = Buffer.allocUnsafe(5);
+
+/** 编码完整数据帧（ULEB 长度前缀 + 载荷），供一次编码多处发送复用。 */
+export function encodeServerFrame(cmd) {
+  const payload = encodeServerCommand(cmd);
+  let pos = 0;
+  let n = payload.length;
+  do {
+    let byte = n & 0x7f;
+    n = Math.floor(n / 128);
+    if (n !== 0) byte |= 0x80;
+    ULEB_HEADER[pos] = byte;
+    pos += 1;
+  } while (n !== 0);
+  const header = Buffer.from(ULEB_HEADER.subarray(0, pos));
+  return Buffer.concat([header, payload], header.length + payload.length);
 }

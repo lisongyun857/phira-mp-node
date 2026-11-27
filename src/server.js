@@ -39,5 +39,15 @@ export function createServer() {
 
   tcp.on('error', (e) => log.error(`server error: ${e.stack || e.message}`));
 
+  // 全局心跳扫描：所有连接共用一个定时器，避免每会话一个 setInterval
+  const heartbeat = setInterval(() => {
+    const now = Date.now();
+    for (const session of state.sessions.values()) {
+      session.checkHeartbeat(now);
+    }
+  }, 2000);
+  heartbeat.unref();
+  tcp.on('close', () => clearInterval(heartbeat));
+
   return { state, tcp };
 }

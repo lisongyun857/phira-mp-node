@@ -1,4 +1,5 @@
 import { log } from './logger.js';
+import { encodeServerFrame } from './protocol/models.js';
 
 export const ROOM_MAX_USERS = 8;
 
@@ -88,14 +89,31 @@ export class Room {
   }
 
   broadcast(cmd) {
-    for (const user of [...this.users, ...this.monitors]) {
-      user.trySend(cmd);
+    const targets = [...this.users, ...this.monitors];
+    if (targets.length === 0) return;
+    let frame;
+    try {
+      frame = encodeServerFrame(cmd);
+    } catch (e) {
+      log.error(`failed to encode ${cmd.type}: ${e.message}`);
+      return;
+    }
+    for (const user of targets) {
+      user.trySendFrame(frame);
     }
   }
 
   broadcastMonitors(cmd) {
+    if (this.monitors.length === 0) return;
+    let frame;
+    try {
+      frame = encodeServerFrame(cmd);
+    } catch (e) {
+      log.error(`failed to encode ${cmd.type}: ${e.message}`);
+      return;
+    }
     for (const user of this.monitors) {
-      user.trySend(cmd);
+      user.trySendFrame(frame, true);
     }
   }
 

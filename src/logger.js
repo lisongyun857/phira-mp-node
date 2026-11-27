@@ -6,7 +6,16 @@ const LEVEL_NAMES = ['TRACE', 'DEBUG', 'INFO', 'WARN', 'ERROR'];
 const threshold = LEVELS[String(process.env.LOG_LEVEL || 'info').toLowerCase()] ?? LEVELS.info;
 
 const LOG_DIR = 'log';
+const FLUSH_INTERVAL = 250;
+/** 缓冲区上限，超过后丢弃新日志，避免慢磁盘导致内存无限增长 */
+const MAX_BUFFER_CHARS = 4 * 1024 * 1024;
+
 let logDirReady = false;
+let buffer = [];
+let bufferChars = 0;
+let flushTimer = null;
+let flushInFlight = false;
+let flushQueued = false;
 
 function currentLogFile() {
   const now = new Date();
@@ -15,16 +24,55 @@ function currentLogFile() {
   return path.join(LOG_DIR, name);
 }
 
-function writeToFile(line) {
+function ensureLogDir() {
+  if (logDirReady) return true;
   try {
-    if (!logDirReady) {
-      fs.mkdirSync(LOG_DIR, { recursive: true });
-      logDirReady = true;
-    }
-    fs.appendFileSync(currentLogFile(), `${line}\n`, 'utf8');
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+    logDirReady = true;
+    return true;
   } catch {
-    // 日志写入失败时不影响服务
+    return false;
   }
+}
+
+/** 异步批量落盘：只在定时器触发时写一次，避免每条日志同步阻塞事件循环 */
+function flush() {
+  flushTimer = null;
+  if (flushInFlight) {
+    flushQueued = true;
+    return;
+  }
+  if (buffer.length === 0) return;
+  if (!ensureLogDir()) {
+    buffer = [];
+    bufferChars = 0;
+    return;
+  }
+  const data = `${buffer.join('\n')}\n`;
+  const file = currentLogFile();
+  buffer = [];
+  bufferChars = 0;
+  flushInFlight = true;
+  fs.appendFile(file, data, 'utf8', () => {
+    flushInFlight = false;
+    if (flushQueued || buffer.length > 0) {
+      flushQueued = false;
+      scheduleFlush();
+    }
+  });
+}
+
+function scheduleFlush() {
+  if (flushTimer) return;
+  flushTimer = setTimeout(flush, FLUSH_INTERVAL);
+  if (typeof flushTimer.unref === 'function') flushTimer.unref();
+}
+
+function enqueue(line) {
+  if (bufferChars >= MAX_BUFFER_CHARS) return;
+  buffer.push(line);
+  bufferChars += line.length + 1;
+  scheduleFlush();
 }
 
 function format(value) {
@@ -39,19 +87,32 @@ function format(value) {
 
 function emit(level, args) {
   const levelNum = LEVELS[level];
+  if (levelNum < threshold) return;
   const message = args.map(format).join(' ');
   const line = `${new Date().toISOString()} ${LEVEL_NAMES[levelNum]} ${message}`;
-  writeToFile(line);
-  if (levelNum >= threshold) {
-    const stream = levelNum >= LEVELS.warn ? console.error : console.log;
-    stream(line);
-  }
+  enqueue(line);
+  const stream = levelNum >= LEVELS.warn ? console.error : console.log;
+  stream(line);
 }
 
 export const log = {
+  isEnabled: (level) => (LEVELS[level] ?? LEVELS.info) >= threshold,
   trace: (...args) => emit('trace', args),
   debug: (...args) => emit('debug', args),
   info: (...args) => emit('info', args),
   warn: (...args) => emit('warn', args),
   error: (...args) => emit('error', args),
 };
+
+// 退出前把剩余日志同步写完
+process.on('exit', () => {
+  if (buffer.length === 0) return;
+  if (!ensureLogDir()) return;
+  try {
+    fs.appendFileSync(currentLogFile(), `${buffer.join('\n')}\n`, 'utf8');
+  } catch {
+    // 忽略退出阶段的写入失败
+  }
+  buffer = [];
+  bufferChars = 0;
+});
