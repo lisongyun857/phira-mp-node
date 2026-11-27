@@ -186,7 +186,7 @@ api:
 | `GET /api/logs?lines=200` | 最新日志文件末尾若干行（最多 1000 行） |
 | `GET /api/room?id=room1` | 任意房间详情，不需要登录 |
 
-管理员操作 `/api/room/action` 时传 `"admin": true` 和 `roomId` 可操作任意房间。该标志仅在以下情况生效：
+管理员操作 `/api/room/action` 时传 `"admin": true` 和 `roomId` 即可，不需要 `sessionToken` 或 QQ 身份。该标志仅在以下情况生效：
 
 - `api.access_token` 为空（默认，接口本身公开）；或
 - 请求携带了正确的 `Authorization: Bearer <access_token>`。

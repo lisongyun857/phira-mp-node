@@ -262,15 +262,19 @@ function dissolveRoom(state, room, notice) {
  * 权限：房主本人；管理员（带有效 API token 时传 admin=true）可操作任意房间。
  */
 async function handleRoomAction(state, body, res, options = {}) {
-  let phiraId;
-  let label;
+  const admin = body.admin === true && options.adminAllowed !== false;
+  let actor = null;
+  let label = 'admin';
 
   if (body.sessionToken) {
     const session = getWebSession(String(body.sessionToken));
     if (!session) throw new ApiError(401, '登录已过期，请重新登录');
-    phiraId = session.phiraId;
-    label = `web:${phiraId}`;
-  } else {
+    actor = state.users.get(session.phiraId) || null;
+    if (!actor) {
+      throw new ApiError(403, '账号当前不在线，请先在游戏中登录服务器');
+    }
+    label = `web:${session.phiraId}`;
+  } else if (body.platform !== undefined && body.userId !== undefined) {
     const identity = normalizeLoginIdentity(body.platform, body.userId);
     if (!identity) throw new ApiError(400, 'platform/userId 不合法');
     if (!state.login) throw new ApiError(503, '登录服务未初始化');
@@ -278,31 +282,31 @@ async function handleRoomAction(state, body, res, options = {}) {
     const binding = state.login.getBinding(identity.platform, identity.userId);
     if (!binding) throw new ApiError(403, '该 QQ 尚未绑定 Phira 账号，请先发送 /p登录');
 
-    phiraId = binding.phiraId;
+    actor = state.users.get(binding.phiraId) || null;
+    if (!actor) {
+      throw new ApiError(403, '绑定的 Phira 账号当前不在线，请先在游戏中登录服务器');
+    }
     label = `${identity.platform}:${identity.userId}`;
-  }
-
-  const actor = state.users.get(phiraId);
-  if (!actor) {
-    throw new ApiError(403, '绑定的 Phira 账号当前不在线，请先在游戏中登录服务器');
+  } else if (!admin) {
+    // 既没有玩家身份，也不是管理员：拒绝
+    throw new ApiError(401, '缺少身份信息');
   }
 
   const action = String(body.action ?? '').trim().toLowerCase();
   if (!action) throw new ApiError(400, '缺少 action');
 
-  const admin = body.admin === true && options.adminAllowed !== false;
   const requestedRoomId = String(body.roomId ?? '').trim();
-  let room = actor.room;
+  let room = actor ? actor.room : null;
   if (requestedRoomId) {
     const requested = state.rooms.get(requestedRoomId);
     if (!requested) throw new ApiError(404, `房间 ${requestedRoomId} 不存在`);
-    if (requested !== actor.room && !admin) throw new ApiError(403, '你不在该房间内');
+    if (requested !== (actor && actor.room) && !admin) throw new ApiError(403, '你不在该房间内');
     room = requested;
   }
   if (!room) throw new ApiError(400, '你当前不在任何房间中');
 
-  const isHost = Boolean(room.host && room.host.id === actor.id);
-  const isMember = room.users.includes(actor) || room.monitors.includes(actor);
+  const isHost = Boolean(actor && room.host && room.host.id === actor.id);
+  const isMember = Boolean(actor && (room.users.includes(actor) || room.monitors.includes(actor)));
 
   const requireHost = () => {
     if (!isHost && !admin) throw new ApiError(403, '只有房主可以执行该操作');
@@ -427,7 +431,7 @@ async function handleRoomAction(state, body, res, options = {}) {
     case 'kick': {
       requireHost();
       const target = findRoomTarget(room, body, false);
-      if (target.id === actor.id) throw new ApiError(400, '不能踢出自己');
+      if (actor && target.id === actor.id) throw new ApiError(400, '不能踢出自己');
       const info = { id: target.id, name: target.name };
       target.trySend({
         type: 'Message',
@@ -443,7 +447,7 @@ async function handleRoomAction(state, body, res, options = {}) {
     case 'set-host': {
       requireHost();
       const target = findRoomTarget(room, body, true);
-      if (target.id === actor.id) throw new ApiError(409, '你已经是房主');
+      if (actor && target.id === actor.id) throw new ApiError(409, '你已经是房主');
       const previous = room.host;
       room.host = target;
       room.sendMessage({ type: 'NewHost', user: target.id });
