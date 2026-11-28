@@ -400,7 +400,8 @@ async function handleRoomAction(state, body, res, options = {}) {
     }
 
     case 'select-chart': {
-      requireMember();
+      // 管理员无需是房间成员即可替房间选谱
+      if (!isMember && !admin) throw new ApiError(403, '你不在该房间内');
       requireHost();
       requireState('SelectChart', '当前不在选谱阶段');
       const chartId = Number(body.chartId);
@@ -408,7 +409,7 @@ async function handleRoomAction(state, body, res, options = {}) {
       const chart = await fetchChart(chartId);
       room.sendMessage({
         type: 'SelectChart',
-        user: actor.id,
+        user: actor ? actor.id : room.host ? room.host.id : 0,
         name: chart.name,
         id: chart.id,
       });
