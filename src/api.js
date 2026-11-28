@@ -5,7 +5,16 @@ import { Room, ROOM_MAX_USERS } from './room.js';
 import { isValidRoomId } from './protocol/models.js';
 import { saveRuntimeOverrides } from './config.js';
 import { handleLoginPage, normalizeLoginIdentity, authenticatePhira } from './login.js';
-import { fetchChart } from './session.js';
+import { fetchChart, fetchMe } from './session.js';
+import {
+  initLocalCharts,
+  readRawBody,
+  saveChart,
+  findChart,
+  serveChart,
+  isValidHash,
+  MAX_CHART_BYTES,
+} from './local-charts.js';
 import { roomStateName } from './lobby.js';
 import { resolveClientIp } from './client-ip.js';
 import {
@@ -139,6 +148,27 @@ function adminConfigView(state, config) {
     qqBotEnabled: Boolean(state.config?.qqBot?.enabled),
     roomCreationAllowed: Boolean(state.allowClientCreateRoom),
   };
+}
+
+/** 用 Phira 官方 /me 校验客户端 access token，返回官方用户信息 */
+async function authenticatePhiraToken(req, res) {
+  const token = bearerToken(req);
+  if (!token) {
+    fail(res, 401, '需要 Phira 账号登录');
+    return null;
+  }
+  try {
+    const me = await fetchMe(token);
+    if (!me || !Number.isInteger(me.id)) {
+      fail(res, 401, '登录状态无效');
+      return null;
+    }
+    return me;
+  } catch (e) {
+    log.warn(`local-charts: token rejected: ${e.message}`);
+    fail(res, 401, '登录状态无效或已过期');
+    return null;
+  }
 }
 
 function isOriginAllowed(origin, allowedOrigins) {
@@ -406,6 +436,7 @@ async function handleRoomAction(state, body, res, options = {}) {
       requireState('SelectChart', '当前不在选谱阶段');
       const chartId = Number(body.chartId);
       if (!Number.isInteger(chartId)) throw new ApiError(400, 'chartId 必须是整数');
+      if (chartId === -1) throw new ApiError(400, '本地谱面只能由客户端在房间内上传后选择');
       const chart = await fetchChart(chartId);
       room.sendMessage({
         type: 'SelectChart',
@@ -545,6 +576,118 @@ async function handleRequest(state, req, res, config) {
       allowClientCreateRoom: Boolean(state.allowClientCreateRoom),
       memoryMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
     });
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/local-charts/upload') {
+    const me = await authenticatePhiraToken(req, res);
+    if (!me) return;
+
+    const roomId = String(req.headers['x-room-id'] ?? '').trim();
+    if (!roomId) {
+      fail(res, 400, '缺少房间 ID');
+      return;
+    }
+    const room = state.rooms.get(roomId);
+    if (!room) {
+      fail(res, 404, `房间 ${roomId} 不存在`);
+      return;
+    }
+    const user = state.users.get(me.id);
+    if (!user || user.room !== room) {
+      fail(res, 403, '你不在该房间内');
+      return;
+    }
+    if (!room.host || room.host.id !== me.id) {
+      fail(res, 403, '只有房主可以上传谱面');
+      return;
+    }
+    if (room.state.kind !== 'SelectChart') {
+      fail(res, 409, '当前不在选谱阶段');
+      return;
+    }
+
+    let name = '';
+    try {
+      name = Buffer.from(String(req.headers['x-chart-name'] ?? ''), 'base64')
+        .toString('utf8')
+        .trim();
+    } catch {
+      name = '';
+    }
+
+    const body = await readRawBody(req, MAX_CHART_BYTES);
+    if (body.length === 0) {
+      fail(res, 400, '谱面文件为空');
+      return;
+    }
+    if (body.length < 4 || body[0] !== 0x50 || body[1] !== 0x4b) {
+      fail(res, 400, '谱面文件不是有效的 zip');
+      return;
+    }
+
+    const meta = saveChart(body, { name, uploaderId: me.id, roomId });
+    room.localChart = {
+      hash: meta.hash,
+      name: meta.name,
+      size: meta.size,
+      expiresAt: meta.expiresAt,
+    };
+    log.info(`API: phira ${me.id} uploaded local chart ${meta.hash} for room ${roomId}`);
+    ok(res, {
+      hash: meta.hash,
+      name: meta.name,
+      size: meta.size,
+      expiresAt: meta.expiresAt,
+    });
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/local-charts/room') {
+    const me = await authenticatePhiraToken(req, res);
+    if (!me) return;
+
+    const roomId = String(url.searchParams.get('roomId') ?? '').trim();
+    const room = state.rooms.get(roomId);
+    if (!room) {
+      fail(res, 404, `房间 ${roomId} 不存在`);
+      return;
+    }
+    const user = state.users.get(me.id);
+    if (!user || user.room !== room) {
+      fail(res, 403, '你不在该房间内');
+      return;
+    }
+
+    const local = room.localChart;
+    if (!local) {
+      ok(res, { chart: null });
+      return;
+    }
+    const meta = findChart(local.hash);
+    if (!meta) {
+      room.localChart = null;
+      ok(res, { chart: null });
+      return;
+    }
+    ok(res, {
+      chart: {
+        hash: meta.hash,
+        name: meta.name,
+        size: meta.size,
+        expiresAt: meta.expiresAt,
+      },
+    });
+    return;
+  }
+
+  if ((method === 'GET' || method === 'HEAD') && pathname.startsWith('/api/local-charts/')) {
+    const hash = pathname.slice('/api/local-charts/'.length);
+    if (!isValidHash(hash)) {
+      fail(res, 404, 'not found');
+      return;
+    }
+    serveChart(req, res, hash);
     return;
   }
 
@@ -1123,6 +1266,9 @@ export function startApi(state) {
     log.info('HTTP API disabled');
     return null;
   }
+
+  const localChartDir = initLocalCharts();
+  log.info(`local chart storage: ${localChartDir} (ttl 3 days, max 50MB)`);
 
   const protectedPatterns = compilePathPatterns(config.protectedPaths);
   const publicPatterns = compilePathPatterns(config.publicPaths);

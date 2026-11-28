@@ -35,7 +35,7 @@ async function fetchWithTimeout(url, options = {}, timeout = API_TIMEOUT) {
   return res.json();
 }
 
-async function fetchMe(token) {
+export async function fetchMe(token) {
   const options = { headers: { Authorization: `Bearer ${token}` } };
   try {
     return await fetchWithTimeout(`${HOST}/me`, options);
@@ -503,6 +503,20 @@ async function processCommand(user, cmd) {
           const room = requireRoomState(user, 'SelectChart');
           room.checkHost(user);
           if (log.isEnabled('debug')) log.debug(`room ${room.id}: user ${user.id} select chart ${cmd.id}`);
+          // id = -1 表示房间内上传的本地谱面，不查询 Phira 官方 API
+          if (cmd.id === -1) {
+            if (!room.localChart) throw new Error('no local chart uploaded');
+            room.sendMessage({
+              type: 'SelectChart',
+              user: user.id,
+              name: room.localChart.name,
+              id: -1,
+            });
+            room.chart = { id: -1, name: room.localChart.name, localHash: room.localChart.hash };
+            room.onStateChange();
+            log.info(`user ${user.id} select local chart ${room.localChart.hash} in room ${room.id}`);
+            return;
+          }
           const chart = await fetchChart(cmd.id);
           room.sendMessage({
             type: 'SelectChart',
