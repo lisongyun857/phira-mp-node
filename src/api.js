@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Room, ROOM_MAX_USERS } from './room.js';
 import { isValidRoomId } from './protocol/models.js';
+import { saveRuntimeOverrides } from './config.js';
 import { handleLoginPage, normalizeLoginIdentity, authenticatePhira } from './login.js';
 import { fetchChart } from './session.js';
 import { roomStateName } from './lobby.js';
@@ -11,10 +12,15 @@ import {
   createWebSession,
   getWebSession,
   deleteWebSession,
+  createAdminSession,
+  getAdminSession,
+  deleteAdminSession,
+  invalidateAdminSessions,
   checkLoginRate,
   resetLoginRate,
 } from './web-auth.js';
-import { log } from './logger.js';
+import { addBan, removeBan, isIpBanned, listBans } from './bans.js';
+import { log, subscribeLogs } from './logger.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
 
@@ -23,6 +29,7 @@ const DEFAULT_OPTIONS = {
   host: '127.0.0.1',
   port: 3052,
   accessToken: '',
+  adminPassword: '',
   protectedPaths: [],
   publicPaths: [],
   trustedProxies: ['127.0.0.1', '::1'],
@@ -85,6 +92,53 @@ function bearerToken(req) {
   const header = String(req.headers.authorization || '').trim();
   if (header.toLowerCase().startsWith('bearer ')) return header.slice(7).trim();
   return header;
+}
+
+/**
+ * 管理端鉴权：管理员会话、API access_token；
+ * 两者都未配置时保持旧的开放模式（便于本地和 QQ 插件直接调用）。
+ */
+function isAdminRequest(req, config) {
+  const token = bearerToken(req);
+  if (token && getAdminSession(token)) return true;
+  if (config.accessToken && hasToken(req, config.accessToken)) return true;
+  if (!config.accessToken && !config.adminPassword) return true;
+  return false;
+}
+
+function requireAdmin(req, res) {
+  if (req.adminAuthorized) return true;
+  fail(res, 401, '需要管理员登录');
+  return false;
+}
+
+/** 管理面板实时日志 SSE 客户端上限 */
+const MAX_LOG_STREAMS = 10;
+let logStreamCount = 0;
+
+function logStreamAuthorized(token, config) {
+  if (token && getAdminSession(token)) return true;
+  if (config.accessToken && token === config.accessToken) return true;
+  if (!config.accessToken && !config.adminPassword) return true;
+  return false;
+}
+
+function adminConfigView(state, config) {
+  return {
+    host: config.host,
+    port: config.port,
+    apiEnabled: Boolean(config.enabled),
+    accessTokenConfigured: Boolean(config.accessToken),
+    adminPasswordConfigured: Boolean(config.adminPassword),
+    protectedPaths: config.protectedPaths,
+    publicPaths: config.publicPaths,
+    allowedOrigins: config.allowedOrigins,
+    trustedProxies: config.trustedProxies,
+    loginEnabled: Boolean(state.login),
+    publicUrl: state.config?.login?.publicUrl || '',
+    qqBotEnabled: Boolean(state.config?.qqBot?.enabled),
+    roomCreationAllowed: Boolean(state.allowClientCreateRoom),
+  };
 }
 
 function isOriginAllowed(origin, allowedOrigins) {
@@ -476,7 +530,7 @@ async function handleRoomAction(state, body, res, options = {}) {
   }
 }
 
-async function handleRequest(state, req, res) {
+async function handleRequest(state, req, res, config) {
   const url = new URL(req.url, 'http://localhost');
   const { pathname } = url;
   const method = req.method || 'GET';
@@ -583,7 +637,221 @@ async function handleRequest(state, req, res) {
     return;
   }
 
+  if (method === 'POST' && pathname === '/api/admin/login') {
+    const body = await readJson(req);
+    const password = String(body.password ?? '');
+    const ip = req.clientIp || '';
+    const rate = checkLoginRate(ip, 'admin');
+    if (!rate.allowed) {
+      fail(res, 429, `尝试次数过多，请 ${rate.retryAfter} 秒后再试`);
+      return;
+    }
+    const expected = config.adminPassword;
+    const fallback = config.accessToken;
+    if (!expected && !fallback) {
+      fail(res, 503, '服务器未设置管理员密码，请先配置 api.admin_password');
+      return;
+    }
+    const matched = expected ? password === expected : password === fallback;
+    if (!password || !matched) {
+      log.warn(`admin: login failed from ${ip || 'unknown'}`);
+      fail(res, 401, '密码错误');
+      return;
+    }
+    resetLoginRate(ip, 'admin');
+    const session = createAdminSession();
+    log.info(`admin: login from ${ip || 'unknown'}`);
+    ok(res, { token: session.token, expiresAt: session.expiresAt });
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/admin/logout') {
+    deleteAdminSession(bearerToken(req));
+    ok(res, { loggedOut: true });
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/admin/config') {
+    if (!requireAdmin(req, res)) return;
+    ok(res, { config: adminConfigView(state, config) });
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/admin/config') {
+    if (!requireAdmin(req, res)) return;
+    const body = await readJson(req);
+    const patch = {};
+
+    if ('adminPassword' in body) {
+      const value = String(body.adminPassword ?? '');
+      if (value && (value.length < 6 || value.length > 64)) {
+        fail(res, 400, '管理员密码长度需为 6~64 位');
+        return;
+      }
+      patch.adminPassword = value;
+    }
+    if ('accessToken' in body) {
+      const value = String(body.accessToken ?? '');
+      if (value.length > 128) {
+        fail(res, 400, 'access_token 过长');
+        return;
+      }
+      patch.accessToken = value;
+    }
+    if ('allowedOrigins' in body) {
+      if (!Array.isArray(body.allowedOrigins)) {
+        fail(res, 400, 'allowedOrigins 必须是数组');
+        return;
+      }
+      const list = body.allowedOrigins.map((item) => String(item).trim()).filter(Boolean);
+      if (list.length === 0) {
+        fail(res, 400, '至少保留一个允许来源，可用 *');
+        return;
+      }
+      patch.allowedOrigins = list;
+    }
+    if (Object.keys(patch).length === 0) {
+      fail(res, 400, '没有需要更新的配置');
+      return;
+    }
+
+    Object.assign(config, patch);
+    if (state.config.api) Object.assign(state.config.api, patch);
+    try {
+      saveRuntimeOverrides({ api: patch });
+    } catch (e) {
+      fail(res, 500, `保存配置失败：${e.message}`);
+      return;
+    }
+    if ('adminPassword' in patch) {
+      invalidateAdminSessions(bearerToken(req));
+    }
+    log.info(`admin: config updated (${Object.keys(patch).join(', ')})`);
+    ok(res, { config: adminConfigView(state, config) });
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/admin/bans') {
+    if (!requireAdmin(req, res)) return;
+    ok(res, { bans: listBans() });
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/admin/ban') {
+    if (!requireAdmin(req, res)) return;
+    const body = await readJson(req);
+    try {
+      const ban = addBan({
+        type: body.type,
+        value: body.value,
+        minutes: body.minutes,
+        reason: body.reason,
+      });
+      log.warn(
+        `admin: banned ${ban.type} ${ban.value}${ban.expiresAt ? ` until ${new Date(ban.expiresAt).toISOString()}` : ' permanently'}`,
+      );
+      ok(res, { ban });
+    } catch (e) {
+      fail(res, 400, e.message);
+    }
+    return;
+  }
+
+  if (method === 'DELETE' && pathname === '/api/admin/ban') {
+    if (!requireAdmin(req, res)) return;
+    const body = await readJson(req);
+    const removed = removeBan(body.type, body.value);
+    log.info(`admin: removed ban ${body.type} ${body.value} (${removed})`);
+    ok(res, { removed });
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/admin/kick') {
+    if (!requireAdmin(req, res)) return;
+    const body = await readJson(req);
+    const id = Number(body.id);
+    const user = state.users.get(id);
+    if (!user) {
+      fail(res, 404, `玩家 ${body.id} 不存在`);
+      return;
+    }
+    const session = user.session;
+    if (!session) {
+      ok(res, { kicked: false, id, name: user.name });
+      return;
+    }
+    session.markLost();
+    log.warn(`admin: kicked ${id} (${user.name})`);
+    ok(res, { kicked: true, id, name: user.name });
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/admin/bindings/unbind') {
+    if (!requireAdmin(req, res)) return;
+    const body = await readJson(req);
+    const keys = Array.isArray(body.keys) ? body.keys.slice(0, 500) : [];
+    if (keys.length === 0) {
+      fail(res, 400, '缺少 keys');
+      return;
+    }
+    if (!state.login) {
+      fail(res, 503, '登录服务未初始化');
+      return;
+    }
+    let unbound = 0;
+    for (const key of keys) {
+      const identity = normalizeLoginIdentity(key?.platform, key?.userId);
+      if (!identity) continue;
+      if (state.login.unbind(identity.platform, identity.userId)) unbound += 1;
+    }
+    log.info(`admin: batch unbound ${unbound}/${keys.length}`);
+    ok(res, { unbound, total: keys.length });
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/logs/stream') {
+    const token = String(url.searchParams.get('token') || '');
+    if (!logStreamAuthorized(token, config)) {
+      fail(res, 401, '需要管理员登录');
+      return;
+    }
+    if (logStreamCount >= MAX_LOG_STREAMS) {
+      fail(res, 503, '实时日志连接数已满');
+      return;
+    }
+    logStreamCount += 1;
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.write('retry: 3000\n\n');
+    try {
+      const { lines } = readRecentLogs(50);
+      for (const line of lines) {
+        res.write(`event: log\ndata: ${JSON.stringify(line)}\n\n`);
+      }
+    } catch {
+      // 初始日志读取失败不影响后续实时推送
+    }
+    const unsubscribe = subscribeLogs((line) => {
+      if (!res.writableEnded) res.write(`event: log\ndata: ${JSON.stringify(line)}\n\n`);
+    });
+    const heartbeat = setInterval(() => {
+      if (!res.writableEnded) res.write(': ping\n\n');
+    }, 15000);
+    heartbeat.unref?.();
+    req.on('close', () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+      logStreamCount = Math.max(0, logStreamCount - 1);
+    });
+    return;
+  }
+
   if (method === 'GET' && pathname === '/api/users') {
+    if (!requireAdmin(req, res)) return;
     const users = [...state.users.values()]
       .map((user) => ({
         id: user.id,
@@ -598,11 +866,37 @@ async function handleRequest(state, req, res) {
   }
 
   if (method === 'GET' && pathname === '/api/bindings') {
-    ok(res, { bindings: state.login ? state.login.listBindings() : [] });
+    if (!requireAdmin(req, res)) return;
+    const all = state.login ? state.login.listBindings() : [];
+    const search = String(url.searchParams.get('search') ?? '').trim().toLowerCase();
+    const filtered = search
+      ? all.filter((item) =>
+          [item.platform, item.userId, item.phiraId, item.phiraName]
+            .map((v) => String(v ?? '').toLowerCase())
+            .some((v) => v.includes(search)),
+        )
+      : all;
+
+    const pageRaw = url.searchParams.get('page');
+    if (pageRaw === null) {
+      ok(res, { bindings: filtered, total: filtered.length });
+      return;
+    }
+
+    const page = Math.max(1, Number(pageRaw) || 1);
+    const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get('pageSize')) || 20));
+    const start = (page - 1) * pageSize;
+    ok(res, {
+      bindings: filtered.slice(start, start + pageSize),
+      total: filtered.length,
+      page,
+      pageSize,
+    });
     return;
   }
 
   if (method === 'GET' && pathname === '/api/logs') {
+    if (!requireAdmin(req, res)) return;
     const requested = Number(url.searchParams.get('lines'));
     const limit = Number.isInteger(requested) && requested > 0 ? Math.min(requested, 1000) : 200;
     try {
@@ -631,6 +925,7 @@ async function handleRequest(state, req, res) {
   }
 
   if (method === 'POST' && pathname === '/api/login/link') {
+    if (!requireAdmin(req, res)) return;
     const body = await readJson(req);
     const identity = normalizeLoginIdentity(body.platform, body.userId);
     if (!identity) {
@@ -654,6 +949,7 @@ async function handleRequest(state, req, res) {
   }
 
   if (method === 'GET' && pathname === '/api/login/binding') {
+    if (!requireAdmin(req, res)) return;
     const identity = normalizeLoginIdentity(
       url.searchParams.get('platform'),
       url.searchParams.get('userId'),
@@ -672,6 +968,7 @@ async function handleRequest(state, req, res) {
   }
 
   if (method === 'DELETE' && pathname === '/api/login/binding') {
+    if (!requireAdmin(req, res)) return;
     const body = await readJson(req);
     const identity = normalizeLoginIdentity(body.platform, body.userId);
     if (!identity) {
@@ -691,6 +988,7 @@ async function handleRequest(state, req, res) {
   }
 
   if (method === 'POST' && pathname === '/api/room-creation') {
+    if (!requireAdmin(req, res)) return;
     const body = await readJson(req);
     if (typeof body.enabled !== 'boolean') {
       fail(res, 400, 'enabled 必须是布尔值');
@@ -707,7 +1005,7 @@ async function handleRequest(state, req, res) {
   if (method === 'POST' && pathname === '/api/room/action') {
     const body = await readJson(req);
     await handleRoomAction(state, body, res, {
-      adminAllowed: !req.apiTokenConfigured || req.apiAuthorized,
+      adminAllowed: req.adminAuthorized,
     });
     return;
   }
@@ -724,6 +1022,7 @@ async function handleRequest(state, req, res) {
   }
 
   if (method === 'POST' && pathname === '/api/rooms/create') {
+    if (!requireAdmin(req, res)) return;
     const body = await readJson(req);
     const id = String(body.id ?? '').trim();
     if (!id) {
@@ -746,6 +1045,7 @@ async function handleRequest(state, req, res) {
   }
 
   if (method === 'POST' && pathname === '/api/rooms/delete') {
+    if (!requireAdmin(req, res)) return;
     const body = await readJson(req);
     const id = String(body.id ?? '').trim();
     if (!id) {
@@ -764,6 +1064,7 @@ async function handleRequest(state, req, res) {
   }
 
   if (method === 'POST' && pathname === '/api/say') {
+    if (!requireAdmin(req, res)) return;
     const body = await readJson(req);
     const target = String(body.target ?? '').trim();
     const content = String(body.content ?? '').trim();
@@ -793,6 +1094,7 @@ async function handleRequest(state, req, res) {
   }
 
   if (method === 'POST' && pathname === '/api/announce') {
+    if (!requireAdmin(req, res)) return;
     const body = await readJson(req);
     const content = String(body.content ?? '').trim();
     if (!content) {
@@ -838,6 +1140,7 @@ export function startApi(state) {
     req.clientIp = clientIp;
     req.apiAuthorized = hasToken(req, config.accessToken);
     req.apiTokenConfigured = Boolean(config.accessToken);
+    req.adminAuthorized = isAdminRequest(req, config);
 
     // 跨域支持：前端部署在独立域名时使用
     const origin = req.headers.origin;
@@ -852,6 +1155,13 @@ export function startApi(state) {
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
       res.end();
+      return;
+    }
+
+    const ipBan = isIpBanned(clientIp);
+    if (ipBan) {
+      log.warn(`API: blocked banned IP ${clientIp}`);
+      fail(res, 403, `你的 IP 已被封禁${ipBan.reason ? `：${ipBan.reason}` : ''}`);
       return;
     }
 
@@ -871,7 +1181,7 @@ export function startApi(state) {
       fail(res, 401, 'unauthorized');
       return;
     }
-    handleRequest(state, req, res).catch((e) => {
+    handleRequest(state, req, res, config).catch((e) => {
       log.warn(`API: ${req.method} ${req.url} from ${clientIp} failed: ${e.message}`);
       if (!res.headersSent) fail(res, e.status || 400, e.message);
     });

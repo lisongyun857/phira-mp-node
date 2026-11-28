@@ -1,6 +1,7 @@
 node_modules/
 log/
 data/
+runtime-config.json
 *.log
 .DS_Store
 Thumbs.db

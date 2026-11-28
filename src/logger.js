@@ -93,6 +93,23 @@ function emit(level, args) {
   enqueue(line);
   const stream = levelNum >= LEVELS.warn ? console.error : console.log;
   stream(line);
+  if (listeners.size > 0) {
+    for (const listener of listeners) {
+      try {
+        listener(line);
+      } catch {
+        // 单个订阅者异常不影响日志
+      }
+    }
+  }
+}
+
+const listeners = new Set();
+
+/** 订阅实时日志（管理面板 SSE），返回取消订阅函数。 */
+export function subscribeLogs(listener) {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
 }
 
 export const log = {

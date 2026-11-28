@@ -3,6 +3,7 @@ import { User } from './user.js';
 import { Room } from './room.js';
 import { buildLobbyMessages } from './lobby.js';
 import { normalizeLang, t } from './l10n.js';
+import { isUserBanned } from './bans.js';
 import { log } from './logger.js';
 
 const HOST = 'https://phira.5wyxi.com';
@@ -274,6 +275,17 @@ export class Session {
     }
 
     if (log.isEnabled('debug')) log.debug(`session ${this.id} <- ${JSON.stringify(info)}`);
+
+    const ban = isUserBanned(info.id);
+    if (ban) {
+      log.warn(`session ${this.id}: rejected banned user ${info.id}`);
+      this.send({
+        type: 'Authenticate',
+        result: err(`账号已被封禁${ban.reason ? `：${ban.reason}` : ''}`),
+      });
+      this.closeAfterFlush();
+      return;
+    }
 
     const lang = normalizeLang(info.language);
     let user = this.server.users.get(info.id);

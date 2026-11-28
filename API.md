@@ -179,19 +179,65 @@ api:
 
 ## 管理接口
 
+管理接口默认需要管理员身份：先用管理员密码换取管理员会话（12 小时），请求头带 `Authorization: Bearer <token>`；也接受 `api.access_token`。两者都未配置时保持开放模式（兼容旧部署和 QQ 插件）。
+
+### `POST /api/admin/login`
+
+```json
+{ "password": "管理员密码" }
+```
+
+成功返回 `{ "token": "...", "expiresAt": 1730000000000 }`。同一 IP 10 分钟内最多尝试 10 次。
+
+密码来自 `server_config.yml` 的 `api.admin_password`，或在管理面板“系统设置”里修改（写入 `runtime-config.json`，重启后仍生效）。
+
+### `POST /api/admin/logout`
+
+注销当前管理员会话。
+
+### 查询接口
+
 | 接口 | 说明 |
 | --- | --- |
-| `GET /api/users` | 在线用户列表（ID、昵称、所在房间、是否旁观） |
-| `GET /api/bindings` | 全部 QQ-Phira 绑定 |
-| `GET /api/logs?lines=200` | 最新日志文件末尾若干行（最多 1000 行） |
-| `GET /api/room?id=room1` | 任意房间详情，不需要登录 |
+| `GET /api/users` | 在线用户列表 |
+| `GET /api/bindings?search=&page=1&pageSize=20` | 绑定搜索与分页；不带 `page` 时返回全部 |
+| `GET /api/logs?lines=200` | 最新日志末尾若干行（最多 1000 行） |
+| `GET /api/room?id=room1` | 任意房间详情（公开，无需登录） |
+| `GET /api/admin/config` | 当前生效的 API 配置（敏感项只返回是否已配置） |
+| `GET /api/admin/bans` | 当前封禁列表 |
 
-管理员操作 `/api/room/action` 时传 `"admin": true` 和 `roomId` 即可，不需要 `sessionToken` 或 QQ 身份。该标志仅在以下情况生效：
+### 操作接口
 
-- `api.access_token` 为空（默认，接口本身公开）；或
-- 请求携带了正确的 `Authorization: Bearer <access_token>`。
+| 接口 | 请求体 |
+| --- | --- |
+| `POST /api/admin/config` | `{ adminPassword?, accessToken?, allowedOrigins? }` |
+| `POST /api/admin/ban` | `{ type: "ip"\|"user", value, minutes, reason? }`（minutes=0 永久） |
+| `DELETE /api/admin/ban` | `{ type, value }` |
+| `POST /api/admin/kick` | `{ id }` |
+| `POST /api/admin/bindings/unbind` | `{ keys: [{ platform, userId }] }` |
+| `POST /api/room-creation` | `{ enabled }` |
+| `POST /api/rooms/create` | `{ id }` |
+| `POST /api/rooms/delete` | `{ id }` |
+| `POST /api/say` | `{ target, content }` |
+| `POST /api/announce` | `{ content }` |
+| `POST /api/login/link` | `{ platform, userId }` |
+| `DELETE /api/login/binding` | `{ platform, userId }` |
 
-配置了令牌后，把 `/api/room/*` 加入 `protected_paths`，未授权的请求会被 401 拦截，无法伪造管理员操作。
+### 实时日志（SSE）
+
+`GET /api/logs/stream?token=<管理员会话或 access_token>`
+
+返回 `text/event-stream`，每条日志为 `event: log`，`data` 是 JSON 字符串。由于浏览器 `EventSource` 不能设置请求头，token 通过查询参数传递；最多 10 个并发连接。
+
+### 管理员房间操作
+
+`POST /api/room/action` 传 `"admin": true` 和 `roomId`，请求头带管理员会话或 `access_token`，不需要玩家身份即可锁定/轮换/踢人/转让/解散。
+
+### 封禁说明
+
+封禁保存在内存中，服务器重启后失效。IP 封禁同时拦截 HTTP API 和游戏 TCP 连接；Phira ID 封禁在游戏鉴权时拒绝。
+
+> 注意：配置 `admin_password` 后，QQ 插件调用管理类接口必须配置相同的 `api_token`（或把 `api.access_token` 留空并自行承担公开风险），否则会返回 401。
 
 ## 公开登录页面
 

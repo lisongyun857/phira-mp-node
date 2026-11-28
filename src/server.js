@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import { Session } from './session.js';
 import { LoginManager } from './login.js';
 import { loadConfig } from './config.js';
+import { isIpBanned } from './bans.js';
 import { log } from './logger.js';
 
 export class ServerState {
@@ -29,6 +30,12 @@ export function createServer() {
   );
 
   const tcp = net.createServer((socket) => {
+    const ipBan = isIpBanned(socket.remoteAddress);
+    if (ipBan) {
+      log.warn(`rejected banned IP ${socket.remoteAddress}`);
+      socket.destroy();
+      return;
+    }
     const id = crypto.randomUUID();
     const session = new Session(id, socket, state);
     state.sessions.set(id, session);

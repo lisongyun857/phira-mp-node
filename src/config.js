@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 
 const CONFIG_FILE = 'server_config.yml';
+const RUNTIME_FILE = 'runtime-config.json';
 
 const DEFAULT_CONFIG = {
   monitors: [2],
@@ -20,6 +21,7 @@ const DEFAULT_CONFIG = {
     host: '127.0.0.1',
     port: 3052,
     accessToken: '',
+    adminPassword: '',
     protectedPaths: [],
     publicPaths: [],
     trustedProxies: ['127.0.0.1', '::1'],
@@ -184,7 +186,7 @@ export function loadConfig() {
   const apiLines = sectionLines(lines, 'api');
   const loginLines = sectionLines(lines, 'login');
 
-  return {
+  const config = {
     monitors:
       monitors === null
         ? [...DEFAULT_CONFIG.monitors]
@@ -217,6 +219,12 @@ export function loadConfig() {
       host: parseString(apiLines, 'host', DEFAULT_CONFIG.api.host),
       port: parseNumber(apiLines, 'port', DEFAULT_CONFIG.api.port),
       accessToken: parseString(apiLines, 'access_token', DEFAULT_CONFIG.api.accessToken),
+      // 管理面板密码；为空时管理端退化为仅用 access_token
+      adminPassword: parseString(
+        apiLines,
+        'admin_password',
+        DEFAULT_CONFIG.api.adminPassword,
+      ),
       // 需要校验 token 的接口；为空时全部公开
       protectedPaths: parseList(apiLines, 'protected_paths') ?? [],
       // 优先级更高的公开接口，可覆盖 protected_paths
@@ -253,4 +261,43 @@ export function loadConfig() {
       ),
     },
   };
+
+  applyRuntimeOverrides(config);
+  return config;
 }
+
+/** 运行时覆盖配置（管理面板修改后写入 runtime-config.json） */
+function loadRuntimeOverrides() {
+  try {
+    const raw = fs.readFileSync(RUNTIME_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function applyRuntimeOverrides(config) {
+  const overrides = loadRuntimeOverrides();
+  const api = overrides && overrides.api;
+  if (!api || typeof api !== 'object') return;
+
+  if (typeof api.adminPassword === 'string') config.api.adminPassword = api.adminPassword;
+  if (typeof api.accessToken === 'string') config.api.accessToken = api.accessToken;
+  if (Array.isArray(api.allowedOrigins)) {
+    config.api.allowedOrigins = api.allowedOrigins.filter((item) => typeof item === 'string');
+  }
+}
+
+/** 合并写入运行时配置，返回完整覆盖内容。 */
+export function saveRuntimeOverrides(partial) {
+  const current = loadRuntimeOverrides();
+  const next = {
+    ...current,
+    ...partial,
+    api: { ...(current.api || {}), ...((partial && partial.api) || {}) },
+  };
+  fs.writeFileSync(RUNTIME_FILE, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+  return next;
+}
+

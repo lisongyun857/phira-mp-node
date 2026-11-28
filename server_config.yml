@@ -48,6 +48,11 @@ api:
   # 示例："请换成一个足够随机的长字符串"
   access_token: ""
 
+  # 管理面板密码（/admin 使用密码登录后签发管理员会话）
+  # 留空时管理面板只能使用 access_token 登录；设置后所有管理接口都要求管理员会话或 access_token
+  # 建议长度 12 位以上；也可以在管理面板的“系统设置”里修改（保存到 runtime-config.json）
+  admin_password: ""
+
   # 需要携带 token 才能访问的接口，默认全部公开（留空即全部公开）
   # 每行一项，支持 "METHOD /path" 或 "/path"（任意方法），* 为通配符
   protected_paths: []
